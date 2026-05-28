@@ -13,6 +13,20 @@ Timelapse auto-exposure tooling extracted from the MOCO workspace.
 - `gphoto2`
 - Optional for richer EXIF reads: `exiftool`
 
+### Metadata utility (ISO/shutter/f-stop)
+
+`camera_ai_analyzer.py` reads capture metadata in this order:
+
+1. `exiftool` (preferred)
+2. Pillow EXIF
+3. `mdls` fallback on macOS
+
+Install `exiftool` on macOS:
+
+```bash
+brew install exiftool
+```
+
 Install Python deps:
 
 ```bash
