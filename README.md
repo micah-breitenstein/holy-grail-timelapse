@@ -41,3 +41,9 @@ python camera_auto_tune.py \
   --interval-seconds 3 \
   --stop-on-optimal
 ```
+
+## Example result
+
+Created with this workflow:
+
+https://www.youtube.com/watch?v=9VeuSSQI37s
