@@ -117,6 +117,76 @@ def parse_downloaded_filename(output_text: str) -> Optional[Path]:
     return Path(raw_name)
 
 
+def get_config_choices(name: str) -> list[str]:
+    result = run_gphoto(["--get-config", name], timeout=20)
+    if result.returncode != 0:
+        return []
+
+    choices: list[str] = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        match = re.match(r"^Choice:\s+\d+\s+(.+)$", line)
+        if match:
+            token = match.group(1).strip()
+            if token:
+                choices.append(token)
+    return choices
+
+
+def resolve_shutter_choice_token(requested_shutter_s: float) -> str:
+    fallback = shutter_to_gphoto_text(requested_shutter_s)
+    choices = get_config_choices("shutterspeed")
+    if not choices:
+        return fallback
+
+    target = float(requested_shutter_s)
+    parsed: list[tuple[str, float]] = []
+    for token in choices:
+        low = token.strip().lower()
+        if low in ("bulb", "0/0"):
+            continue
+        try:
+            parsed.append((token, float(parse_shutter(token))))
+        except Exception:
+            continue
+
+    if not parsed:
+        return fallback
+
+    best_token, _ = min(
+        parsed,
+        key=lambda item: abs(math.log(max(item[1], 1e-9)) - math.log(max(target, 1e-9))),
+    )
+    return best_token
+
+
+def resolve_fstop_choice_token(requested_fstop: float) -> str:
+    fallback = f"f/{requested_fstop:g}"
+    choices = get_config_choices("f-number")
+    if not choices:
+        return fallback
+
+    target = float(requested_fstop)
+    parsed: list[tuple[str, float]] = []
+    for token in choices:
+        match = re.search(r"([0-9]+(?:\.[0-9]+)?)", token)
+        if not match:
+            continue
+        try:
+            parsed.append((token, float(match.group(1))))
+        except Exception:
+            continue
+
+    if not parsed:
+        return fallback
+
+    best_token, _ = min(
+        parsed,
+        key=lambda item: abs(math.log(max(item[1], 1e-9)) - math.log(max(target, 1e-9))),
+    )
+    return best_token
+
+
 def newest_image_in_dir(workdir: Path) -> Optional[Path]:
     exts = {".jpg", ".jpeg", ".png", ".arw", ".cr2", ".cr3", ".nef", ".dng"}
     candidates = [p for p in workdir.iterdir() if p.is_file() and p.suffix.lower() in exts]
@@ -206,7 +276,7 @@ def apply_shutter_with_backcheck(
     previous_shutter_s: float,
     requested_shutter_s: float,
 ) -> Tuple[bool, float, str]:
-    requested_text = shutter_to_gphoto_text(requested_shutter_s)
+    requested_text = resolve_shutter_choice_token(float(requested_shutter_s))
     ok, msg = apply_setting("shutterspeed", requested_text)
     if not ok:
         return False, requested_shutter_s, msg
@@ -252,7 +322,8 @@ def apply_fstop_with_backcheck(
     requested_fstop: float,
     fstop_stops: Sequence[float],
 ) -> Tuple[bool, float, str]:
-    ok, msg = apply_setting("f-number", f"{requested_fstop}")
+    requested_token = resolve_fstop_choice_token(float(requested_fstop))
+    ok, msg = apply_setting("f-number", requested_token)
     if not ok:
         return False, requested_fstop, msg
 
@@ -262,7 +333,7 @@ def apply_fstop_with_backcheck(
 
     # Brightening means moving to a smaller f-number (e.g. 16 -> 14 -> 13).
     if requested_fstop < previous_fstop and actual_fstop < (requested_fstop - 1e-6):
-        retry_ok, retry_msg = apply_setting("f-number", f"{requested_fstop}")
+        retry_ok, retry_msg = apply_setting("f-number", requested_token)
         if not retry_ok:
             combined_error = "\n".join(part for part in [msg, read_msg, retry_msg] if part).strip()
             return False, actual_fstop, combined_error
