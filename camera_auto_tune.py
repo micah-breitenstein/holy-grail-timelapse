@@ -1189,7 +1189,8 @@ def main() -> int:
             rec.suggested_shutter_s = float(applied_shutter_s)
             if msg:
                 print(msg)
-            if format_shutter(rec.suggested_shutter_s) != current_shutter_text:
+            applied_shutter_text = shutter_to_gphoto_text(rec.suggested_shutter_s)
+            if applied_shutter_text != current_shutter_text:
                 changed = True
             else:
                 shutter_stuck_noop = True
