@@ -1174,6 +1174,8 @@ def main() -> int:
 
         shutter_text = shutter_to_gphoto_text(rec.suggested_shutter_s)
         current_shutter_text = shutter_to_gphoto_text(current_shutter_s)
+        shutter_change_requested = shutter_text != current_shutter_text
+        shutter_stuck_noop = False
         if shutter_text != current_shutter_text:
             print(f"Applying: gphoto2 --set-config shutterspeed={shutter_text}")
             ok, applied_shutter_s, msg = apply_shutter_with_backcheck(
@@ -1189,6 +1191,84 @@ def main() -> int:
                 print(msg)
             if format_shutter(rec.suggested_shutter_s) != current_shutter_text:
                 changed = True
+            else:
+                shutter_stuck_noop = True
+
+        # If shutter change was requested but the camera kept the same shutter,
+        # apply an alternate one-stop change now to avoid repeated no-op loops.
+        if shutter_change_requested and shutter_stuck_noop and not changed:
+            if rec.action in ("darken", "speed_up_shutter"):
+                iso_fallback = next_stop_value(float(current_iso), iso_stops, brighten=False)
+                if iso_fallback is not None and iso_fallback >= float(args.iso_min):
+                    fallback_iso = int(round(iso_fallback))
+                    if fallback_iso != int(current_iso):
+                        print(
+                            "Shutter remained unchanged; applying darker ISO fallback "
+                            f"{current_iso} -> {fallback_iso}."
+                        )
+                        ok, msg = apply_setting("iso", str(fallback_iso))
+                        print("Set ISO fallback:", "ok" if ok else "failed")
+                        if not ok:
+                            print(msg)
+                            return 1
+                        rec.suggested_iso = fallback_iso
+                        changed = True
+                if not changed and not effective_lock_aperture:
+                    f_fallback = next_fstop_value(float(current_fstop), fstop_stops, brighten=False)
+                    if f_fallback is not None and abs(f_fallback - float(current_fstop)) > 1e-6:
+                        print(
+                            "Shutter remained unchanged; applying darker aperture fallback "
+                            f"f/{current_fstop} -> f/{f_fallback}."
+                        )
+                        ok, applied_fstop, msg = apply_fstop_with_backcheck(
+                            previous_fstop=float(current_fstop),
+                            requested_fstop=float(f_fallback),
+                            fstop_stops=fstop_stops,
+                        )
+                        print("Set f-stop fallback:", "ok" if ok else "failed")
+                        if not ok:
+                            print(msg)
+                            return 1
+                        rec.suggested_fstop = float(applied_fstop)
+                        if msg:
+                            print(msg)
+                        changed = True
+            elif rec.action == "brighten":
+                iso_fallback = next_stop_value(float(current_iso), iso_stops, brighten=True)
+                if iso_fallback is not None and iso_fallback <= float(args.iso_max):
+                    fallback_iso = int(round(iso_fallback))
+                    if fallback_iso != int(current_iso):
+                        print(
+                            "Shutter remained unchanged; applying brighter ISO fallback "
+                            f"{current_iso} -> {fallback_iso}."
+                        )
+                        ok, msg = apply_setting("iso", str(fallback_iso))
+                        print("Set ISO fallback:", "ok" if ok else "failed")
+                        if not ok:
+                            print(msg)
+                            return 1
+                        rec.suggested_iso = fallback_iso
+                        changed = True
+                if not changed and not effective_lock_aperture:
+                    f_fallback = next_fstop_value(float(current_fstop), fstop_stops, brighten=True)
+                    if f_fallback is not None and abs(f_fallback - float(current_fstop)) > 1e-6:
+                        print(
+                            "Shutter remained unchanged; applying brighter aperture fallback "
+                            f"f/{current_fstop} -> f/{f_fallback}."
+                        )
+                        ok, applied_fstop, msg = apply_fstop_with_backcheck(
+                            previous_fstop=float(current_fstop),
+                            requested_fstop=float(f_fallback),
+                            fstop_stops=fstop_stops,
+                        )
+                        print("Set f-stop fallback:", "ok" if ok else "failed")
+                        if not ok:
+                            print(msg)
+                            return 1
+                        rec.suggested_fstop = float(applied_fstop)
+                        if msg:
+                            print(msg)
+                        changed = True
 
         if not effective_lock_aperture and abs(rec.suggested_fstop - current_fstop) > 1e-6:
             print(f"Applying: gphoto2 --set-config f-number={rec.suggested_fstop}")
