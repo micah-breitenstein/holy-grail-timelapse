@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 *.log
+*.bak.*
+.DS_Store
 reject_candidates.csv
 timelapse/
