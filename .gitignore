@@ -5,4 +5,5 @@ __pycache__/
 *.bak.*
 .DS_Store
 reject_candidates.csv
-timelapse/
+timelapse/*
+!timelapse/.gitignore
