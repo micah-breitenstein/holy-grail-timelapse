@@ -51,14 +51,14 @@ DEFAULT_SHUTTER_STOPS: List[float] = [
 ]
 
 DEFAULT_FSTOP_STOPS: List[float] = [
-    1.0, 1.1, 1.2, 1.4, 1.6, 1.8,
+    1.4, 1.6, 1.8,
     2.0, 2.2, 2.5, 2.8,
     3.2, 3.5, 4.0, 4.5,
     5.0, 5.6, 6.3,
     7.1, 8.0, 9.0,
     10.0, 11.0, 13.0,
-    14.0, 16.0, 18.0,
-    20.0, 22.0,
+    14.0, 16.0,
+    18.0, 20.0, 22.0, 25.0, 29.0, 32.0,
 ]
 
 
@@ -270,29 +270,6 @@ def nearest_stop(value: float, stops: Sequence[float]) -> float:
     return min(stops, key=lambda s: abs(math.log(max(value, 1e-12)) - math.log(max(s, 1e-12))))
 
 
-def move_stop_toward(current: float, target: float, stops: Sequence[float], max_steps: int) -> float:
-    ordered = sorted({float(v) for v in stops})
-    if not ordered:
-        return float(target)
-
-    current_idx = min(
-        range(len(ordered)),
-        key=lambda i: abs(math.log(max(current, 1e-12)) - math.log(max(ordered[i], 1e-12))),
-    )
-    target_idx = min(
-        range(len(ordered)),
-        key=lambda i: abs(math.log(max(target, 1e-12)) - math.log(max(ordered[i], 1e-12))),
-    )
-
-    step_budget = max(0, int(max_steps))
-    if step_budget == 0 or target_idx == current_idx:
-        return ordered[current_idx]
-
-    direction = 1 if target_idx > current_idx else -1
-    steps = min(step_budget, abs(target_idx - current_idx))
-    return ordered[current_idx + (direction * steps)]
-
-
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
@@ -351,49 +328,40 @@ def recommend_settings(
     force_iso_first_when_brightening: bool = False,
     force_aperture_first_when_brightening: bool = False,
     prefer_aperture_last: bool = False,
-    max_aperture_stop_steps: int = 1,
 ) -> Recommendation:
     suggested_iso = int(iso)
     suggested_shutter = float(shutter_s)
     suggested_fstop = float(fstop)
     reason = ""
 
-    # Decision priority tuned for stability:
-    # 1) Respect delta EV first so mild clipping does not invert direction.
-    # 2) Apply clip-only corrections near target with smaller steps.
+    # Decision priority:
+    # 1) If frame is dark, always brighten first.
+    # 2) If frame is bright/clipping, darken.
     # 3) Blur-only correction applies only when exposure is near target.
-    severe_highlight_clip_pct = 6.0
-    clip_adjust_step_ev = min(max_step_ev, 0.33)
-
-    if metrics.delta_ev > deadband_ev:
-        if metrics.highlight_clip_pct >= severe_highlight_clip_pct:
-            action = "hold"
-            raw_step = 0.0
-            reason = "conflicting metrics: dark median with severe highlight clipping"
-        else:
-            action = "brighten"
-            raw_step = clamp(metrics.delta_ev, -max_step_ev, max_step_ev)
-            reason = "underexposed relative to target luminance"
-    elif metrics.delta_ev < -deadband_ev:
+    if metrics.highlight_clip_pct > 2.0:
         action = "darken"
-        raw_step = clamp(metrics.delta_ev, -max_step_ev, max_step_ev)
-        reason = "overexposed relative to target luminance"
-    elif metrics.highlight_clip_pct > 2.0:
-        action = "darken"
-        raw_step = -clip_adjust_step_ev
+        raw_step = -max_step_ev
         reason = "highlight clipping above 2%"
     elif metrics.shadow_clip_pct > 2.0:
         action = "brighten"
-        raw_step = clip_adjust_step_ev
+        raw_step = max_step_ev
         reason = "shadow clipping above 2%"
+    elif abs(metrics.delta_ev) < deadband_ev:
+        action = "hold"
+        raw_step = 0.0
+        reason = "within EV deadband"
+    elif metrics.delta_ev > deadband_ev:
+        action = "brighten"
+        raw_step = clamp(metrics.delta_ev, -max_step_ev, max_step_ev)
+        reason = "underexposed relative to target luminance"
     elif metrics.blur_score < blur_min:
         action = "speed_up_shutter"
         raw_step = -min(max_step_ev, 0.67)
         reason = "blur score below threshold"
     else:
-        action = "hold"
-        raw_step = 0.0
-        reason = "within EV deadband"
+        action = "darken"
+        raw_step = clamp(metrics.delta_ev, -max_step_ev, max_step_ev)
+        reason = "median luminance offset from target"
 
     if raw_step == 0.0:
         return Recommendation(
@@ -407,15 +375,11 @@ def recommend_settings(
 
     achieved_shutter_ev = 0.0
     remaining_ev = raw_step
-    at_shutter_ceiling = suggested_shutter >= (shutter_max_s * (1.0 - 1e-6))
-    aperture_first_due_to_shutter_ceiling = (
-        raw_step > 0.0 and at_shutter_ceiling and not lock_aperture
-    )
 
     # Optional strategy: when brightening and aperture control is allowed,
     # open aperture first to preserve lower ISO.
     if (
-        (force_aperture_first_when_brightening or aperture_first_due_to_shutter_ceiling)
+        force_aperture_first_when_brightening
         and not prefer_aperture_last
         and raw_step > 0.0
         and not lock_aperture
@@ -423,7 +387,6 @@ def recommend_settings(
     ):
         f_candidate = suggested_fstop / (2.0 ** (remaining_ev / 2.0))
         f_candidate = nearest_stop(f_candidate, fstop_stops)
-        f_candidate = move_stop_toward(suggested_fstop, f_candidate, fstop_stops, max_aperture_stop_steps)
         aperture_achieved_ev = -2.0 * math.log2(max(f_candidate, 1e-9) / max(suggested_fstop, 1e-9))
         suggested_fstop = float(f_candidate)
         remaining_ev = remaining_ev - aperture_achieved_ev
@@ -448,7 +411,7 @@ def recommend_settings(
         remaining_ev = raw_step - iso_achieved_ev
 
     # EV model for shutter: shorter exposure darkens, longer brightens.
-    if raw_step > 0.0 and abs(remaining_ev) > 0.05:
+    if abs(remaining_ev) > 0.05:
         shutter_candidate = suggested_shutter * (2.0 ** remaining_ev)
         shutter_candidate = clamp(shutter_candidate, shutter_min_s, shutter_max_s)
         shutter_candidate = nearest_stop(shutter_candidate, shutter_stops)
@@ -456,40 +419,12 @@ def recommend_settings(
         achieved_shutter_ev = math.log2(max(shutter_candidate, 1e-9) / max(suggested_shutter, 1e-9))
         remaining_ev = remaining_ev - achieved_shutter_ev
         suggested_shutter = shutter_candidate
-
-    # For darkening, prefer shutter first so ISO only changes when it has to.
-    # For brightening, keep the existing aperture-first / ISO-first strategy.
-    # For darkening, prefer shutter first so ISO only changes when it has to.
-    # For brightening, keep the existing aperture-first / ISO-first strategy.
-    if raw_step < 0.0 and abs(remaining_ev) > 0.05:
-        shutter_candidate = suggested_shutter * (2.0 ** remaining_ev)
-        shutter_candidate = clamp(shutter_candidate, shutter_min_s, shutter_max_s)
-        shutter_candidate = nearest_stop(shutter_candidate, shutter_stops)
-
-        achieved_shutter_ev = math.log2(max(shutter_candidate, 1e-9) / max(suggested_shutter, 1e-9))
-        remaining_ev = remaining_ev - achieved_shutter_ev
-        suggested_shutter = shutter_candidate
-
-        if abs(remaining_ev) > 0.05:
-            if not lock_aperture:
-                f_candidate = suggested_fstop / (2.0 ** (remaining_ev / 2.0))
-                f_candidate = nearest_stop(f_candidate, fstop_stops)
-                f_candidate = move_stop_toward(suggested_fstop, f_candidate, fstop_stops, max_aperture_stop_steps)
-                aperture_achieved_ev = -2.0 * math.log2(max(f_candidate, 1e-9) / max(suggested_fstop, 1e-9))
-                suggested_fstop = float(f_candidate)
-                remaining_ev = remaining_ev - aperture_achieved_ev
-
-        if abs(remaining_ev) > 0.05:
-            iso_candidate = suggested_iso * (2.0 ** remaining_ev)
-            iso_candidate = clamp(iso_candidate, float(iso_min), float(iso_max))
-            iso_candidate = nearest_stop(iso_candidate, iso_stops)
-            suggested_iso = int(round(iso_candidate))
 
     # If shutter-first path was used, compensate remainder with aperture first,
     # then ISO by default. In aperture-last mode, do ISO first and only open
     # aperture if shutter/ISO could not finish the requested EV step.
-    if raw_step > 0.0 and not prefer_iso_first and abs(remaining_ev) > 0.05:
-        if prefer_aperture_last and not aperture_first_due_to_shutter_ceiling:
+    if not prefer_iso_first and abs(remaining_ev) > 0.05:
+        if prefer_aperture_last:
             iso_candidate = suggested_iso * (2.0 ** remaining_ev)
             iso_candidate = clamp(iso_candidate, float(iso_min), float(iso_max))
             iso_candidate = nearest_stop(iso_candidate, iso_stops)
@@ -500,7 +435,6 @@ def recommend_settings(
             if not lock_aperture and abs(remaining_ev) > 0.05:
                 f_candidate = suggested_fstop / (2.0 ** (remaining_ev / 2.0))
                 f_candidate = nearest_stop(f_candidate, fstop_stops)
-                f_candidate = move_stop_toward(suggested_fstop, f_candidate, fstop_stops, max_aperture_stop_steps)
                 aperture_achieved_ev = -2.0 * math.log2(max(f_candidate, 1e-9) / max(suggested_fstop, 1e-9))
                 suggested_fstop = float(f_candidate)
                 remaining_ev = remaining_ev - aperture_achieved_ev
@@ -508,7 +442,6 @@ def recommend_settings(
             if not lock_aperture:
                 f_candidate = suggested_fstop / (2.0 ** (remaining_ev / 2.0))
                 f_candidate = nearest_stop(f_candidate, fstop_stops)
-                f_candidate = move_stop_toward(suggested_fstop, f_candidate, fstop_stops, max_aperture_stop_steps)
                 aperture_achieved_ev = -2.0 * math.log2(max(f_candidate, 1e-9) / max(suggested_fstop, 1e-9))
                 suggested_fstop = float(f_candidate)
                 remaining_ev = remaining_ev - aperture_achieved_ev
@@ -528,7 +461,6 @@ def recommend_settings(
             # For f-stop, exposure ~ 1 / N^2. Positive EV means smaller N.
             f_candidate = suggested_fstop / (2.0 ** (aperture_remaining_ev / 2.0))
             f_candidate = nearest_stop(f_candidate, fstop_stops)
-            f_candidate = move_stop_toward(suggested_fstop, f_candidate, fstop_stops, max_aperture_stop_steps)
             suggested_fstop = float(f_candidate)
 
     total_applied_ev = (
@@ -563,7 +495,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shutter-min", default="1/1000", help="Fastest allowed shutter (smallest time).")
     parser.add_argument("--shutter-max", default="1/30", help="Slowest allowed shutter (largest time).")
     parser.add_argument("--iso-min", type=int, default=100, help="Minimum allowed ISO.")
-    parser.add_argument("--iso-max", type=int, default=51200, help="Maximum allowed ISO.")
+    parser.add_argument("--iso-max", type=int, default=6400, help="Maximum allowed ISO.")
     parser.add_argument("--lock-aperture", action="store_true", default=False, help="Do not change f-stop.")
     parser.add_argument("--blur-min", type=float, default=120.0, help="Minimum blur score threshold.")
     parser.add_argument(
@@ -676,8 +608,6 @@ def main() -> int:
         blur_min=args.blur_min,
         prefer_iso_first_when_blur_low=(args.iso_strategy == "first-when-blur-low"),
         force_iso_first_when_brightening=False,
-        force_aperture_first_when_brightening=True,
-        prefer_aperture_last=False,
     )
 
     result = {

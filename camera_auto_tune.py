@@ -14,12 +14,10 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 import re
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,9 +28,6 @@ from camera_ai_analyzer import (
     DEFAULT_ISO_STOPS,
     DEFAULT_SHUTTER_STOPS,
     AnalysisMetrics,
-    clamp,
-    nearest_stop,
-    move_stop_toward,
     analyze_image,
     format_shutter,
     parse_shutter,
@@ -42,61 +37,55 @@ from camera_ai_analyzer import (
 )
 
 
-KEEPER_SEQUENCE_LOCK = threading.Lock()
-KEEPER_NEXT_INDEX_BY_DIR: dict[str, int] = {}
-KEEPER_NAME_RE = re.compile(r"^timelapse_(\d{6})\.[A-Za-z0-9]+$")
-GPHOTO_DEBUG = False
+def wait_for_file_stable(path: Path, stable_for_s: float = 1.5, max_wait_s: float = 120.0, poll_interval_s: float = 0.5) -> bool:
+    """Wait until a file exists and its size has not changed for stable_for_s seconds.
+    Returns True when stable, False if max_wait_s exceeded."""
+    deadline = time.time() + max_wait_s
+    last_size = -1
+    stable_since: Optional[float] = None
+    while time.time() < deadline:
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            time.sleep(poll_interval_s)
+            continue
+        if size != last_size:
+            last_size = size
+            stable_since = time.time()
+        elif stable_since is not None and (time.time() - stable_since) >= stable_for_s:
+            return True
+        time.sleep(poll_interval_s)
+    return False
 
 
-def suppress_macos_camera_daemons() -> None:
-    # macOS daemons can preemptively claim the camera USB/PTP interface.
-    # Kill them before each gphoto command to improve capture reliability.
-    for daemon in ("PTPCamera", "ptpcamerad", "icdd", "mscamerad"):
-        subprocess.run(
-            ["pkill", "-9", daemon],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    time.sleep(0.15)
-
-
-def suppress_linux_camera_daemons() -> None:
-    # Linux desktop services can claim the USB/PTP interface.
-    for daemon in ("gvfs-gphoto2-volume-monitor", "gvfsd-gphoto2"):
-        subprocess.run(
-            ["pkill", "-9", "-f", daemon],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    time.sleep(0.15)
-
-
-def start_macos_daemon_suppressor(interval_s: float = 0.2):
-    def _worker():
-        while True:
-            for daemon in ("PTPCamera", "ptpcamerad", "icdd", "mscamerad"):
-                subprocess.run(
-                    ["pkill", "-9", daemon],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-            time.sleep(max(0.05, float(interval_s)))
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    return thread
+def wait_for_camera_ready(max_wait_s: float = 120.0, poll_interval_s: float = 2.0) -> bool:
+    """Poll gphoto2 with a trivial get-config until the camera responds cleanly.
+    Returns True when ready, False if max_wait_s exceeded."""
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        try:
+            result = subprocess.run(
+                ["gphoto2", "--get-config", "batterylevel"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            returncode = result.returncode
+            combined = (result.stdout + result.stderr).lower()
+        except subprocess.TimeoutExpired:
+            returncode = -1
+            combined = "timeout"
+        if returncode == 0:
+            return True
+        # Camera still busy with NR, writing, or probe timed out - keep waiting
+        if any(m in combined for m in ("busy", "unavailable", "could not claim", "io-library", "ptp", "timeout")):
+            time.sleep(poll_interval_s)
+            continue
+        # Unexpected error - stop waiting
+        return False
+    return False
 
 
 def run_gphoto(args: Sequence[str], timeout: int = 45) -> subprocess.CompletedProcess[str]:
-    suppress_macos_camera_daemons()
-    suppress_linux_camera_daemons()
-    cmd = ["gphoto2"]
-    if GPHOTO_DEBUG:
-        cmd.extend(["--debug", "--debug-logfile=gphoto2-debug.log"])
-    cmd.extend(args)
+    cmd = ["gphoto2", *args]
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
     except subprocess.TimeoutExpired as exc:
@@ -117,76 +106,6 @@ def parse_downloaded_filename(output_text: str) -> Optional[Path]:
     return Path(raw_name)
 
 
-def get_config_choices(name: str) -> list[str]:
-    result = run_gphoto(["--get-config", name], timeout=20)
-    if result.returncode != 0:
-        return []
-
-    choices: list[str] = []
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        match = re.match(r"^Choice:\s+\d+\s+(.+)$", line)
-        if match:
-            token = match.group(1).strip()
-            if token:
-                choices.append(token)
-    return choices
-
-
-def resolve_shutter_choice_token(requested_shutter_s: float) -> str:
-    fallback = shutter_to_gphoto_text(requested_shutter_s)
-    choices = get_config_choices("shutterspeed")
-    if not choices:
-        return fallback
-
-    target = float(requested_shutter_s)
-    parsed: list[tuple[str, float]] = []
-    for token in choices:
-        low = token.strip().lower()
-        if low in ("bulb", "0/0"):
-            continue
-        try:
-            parsed.append((token, float(parse_shutter(token))))
-        except Exception:
-            continue
-
-    if not parsed:
-        return fallback
-
-    best_token, _ = min(
-        parsed,
-        key=lambda item: abs(math.log(max(item[1], 1e-9)) - math.log(max(target, 1e-9))),
-    )
-    return best_token
-
-
-def resolve_fstop_choice_token(requested_fstop: float) -> str:
-    fallback = f"f/{requested_fstop:g}"
-    choices = get_config_choices("f-number")
-    if not choices:
-        return fallback
-
-    target = float(requested_fstop)
-    parsed: list[tuple[str, float]] = []
-    for token in choices:
-        match = re.search(r"([0-9]+(?:\.[0-9]+)?)", token)
-        if not match:
-            continue
-        try:
-            parsed.append((token, float(match.group(1))))
-        except Exception:
-            continue
-
-    if not parsed:
-        return fallback
-
-    best_token, _ = min(
-        parsed,
-        key=lambda item: abs(math.log(max(item[1], 1e-9)) - math.log(max(target, 1e-9))),
-    )
-    return best_token
-
-
 def newest_image_in_dir(workdir: Path) -> Optional[Path]:
     exts = {".jpg", ".jpeg", ".png", ".arw", ".cr2", ".cr3", ".nef", ".dng"}
     candidates = [p for p in workdir.iterdir() if p.is_file() and p.suffix.lower() in exts]
@@ -195,168 +114,107 @@ def newest_image_in_dir(workdir: Path) -> Optional[Path]:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def apply_setting(name: str, value: str, retries: int = 2, retry_seconds: float = 1.0) -> Tuple[bool, str]:
+SHUTTER_CHOICES_CACHE: Optional[list[tuple[str, float]]] = None
+
+
+def load_shutter_choices() -> list[tuple[str, float]]:
+    global SHUTTER_CHOICES_CACHE
+    if SHUTTER_CHOICES_CACHE is not None:
+        return SHUTTER_CHOICES_CACHE
+
+    result = run_gphoto(["--get-config", "shutterspeed"], timeout=20)
+    if result.returncode != 0:
+        SHUTTER_CHOICES_CACHE = []
+        return SHUTTER_CHOICES_CACHE
+
+    choices: list[tuple[str, float]] = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"^Choice:\s+\d+\s+(.+)$", line.strip())
+        if not match:
+            continue
+        raw_choice = match.group(1).strip()
+        try:
+            parsed_choice = parse_shutter(raw_choice)
+        except Exception:
+            continue
+        choices.append((raw_choice, parsed_choice))
+
+    SHUTTER_CHOICES_CACHE = choices
+    return SHUTTER_CHOICES_CACHE
+
+
+def resolve_shutter_choice(value: str) -> str:
+    try:
+        target_seconds = parse_shutter(value)
+    except Exception:
+        return value
+
+    choices = load_shutter_choices()
+    if not choices:
+        return value
+
+    best_label, best_seconds = min(
+        choices,
+        key=lambda item: abs(item[1] - target_seconds),
+    )
+    tolerance = max(1e-6, target_seconds * 0.02)
+    if abs(best_seconds - target_seconds) <= tolerance:
+        return best_label
+    return value
+
+
+def apply_setting(name: str, value: str, retries: int = 6, retry_seconds: float = 1.5) -> Tuple[bool, str]:
     attempt = 0
     max_attempts = max(1, int(retries) + 1)
     last_message = ""
 
     while attempt < max_attempts:
         attempt += 1
-        result = run_gphoto(["--set-config", f"{name}={value}"], timeout=20)
+
+        # Some cameras expose settings as temporarily read-only while they are
+        # still flushing buffers or finishing in-camera processing.
+        wait_for_camera_ready(max_wait_s=15.0, poll_interval_s=1.0)
+
+        requested_value = resolve_shutter_choice(value) if name == "shutterspeed" else value
+        result = run_gphoto(["--set-config", f"{name}={requested_value}"], timeout=20)
         combined = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode == 0:
             return True, combined
 
         last_message = combined
-        transient = is_transient_capture_error(combined) or ("could not claim the usb device" in combined.lower())
+        combined_l = combined.lower()
+        read_only = ("property" in combined_l and "read only" in combined_l)
+        transient = (
+            is_transient_capture_error(combined)
+            or ("could not claim the usb device" in combined_l)
+            or read_only
+            or ("busy" in combined_l)
+            or ("unavailable" in combined_l)
+        )
+        if read_only and attempt < max_attempts:
+            # Camera accepted capture but is still locking writable controls.
+            # Back off longer before retrying the same setting.
+            extra_wait = min(45.0, 8.0 * attempt)
+            print(
+                f"{name} is temporarily read-only (attempt {attempt}/{max_attempts}); "
+                f"waiting {extra_wait:.1f}s before retry."
+            )
+            wait_for_camera_ready(max_wait_s=extra_wait + 15.0, poll_interval_s=1.0)
+            time.sleep(extra_wait)
+            continue
         if transient and attempt < max_attempts:
-            time.sleep(max(0.0, float(retry_seconds)))
+            transient_wait = min(20.0, max(1.0, float(retry_seconds)) * (2 ** (attempt - 1)))
+            print(
+                f"{name} set transient failure (attempt {attempt}/{max_attempts}); "
+                f"waiting {transient_wait:.1f}s before retry."
+            )
+            wait_for_camera_ready(max_wait_s=20.0, poll_interval_s=1.0)
+            time.sleep(transient_wait)
             continue
 
         break
 
     return False, last_message
-
-
-def read_current_fstop() -> Tuple[Optional[float], str]:
-    result = run_gphoto(["--get-config", "f-number"], timeout=20)
-    combined = (result.stdout + "\n" + result.stderr).strip()
-    if result.returncode != 0:
-        return None, combined
-
-    match = re.search(r"^Current:\s*(?:f/)?([0-9]+(?:\.[0-9]+)?)\s*$", result.stdout, flags=re.MULTILINE)
-    if not match:
-        match = re.search(r"Current:\s*(?:f/)?([0-9]+(?:\.[0-9]+)?)", combined)
-    if not match:
-        return None, combined
-
-    try:
-        return float(match.group(1)), combined
-    except Exception:
-        return None, combined
-
-
-def read_current_shutter() -> Tuple[Optional[float], str]:
-    result = run_gphoto(["--get-config", "shutterspeed"], timeout=20)
-    combined = (result.stdout + "\n" + result.stderr).strip()
-    if result.returncode != 0:
-        return None, combined
-
-    match = re.search(r"^Current:\s*(.+?)\s*$", result.stdout, flags=re.MULTILINE)
-    if not match:
-        match = re.search(r"Current:\s*(.+?)(?:\r?\n|$)", combined)
-    if not match:
-        return None, combined
-
-    current_raw = match.group(1).strip().strip('"')
-    token = current_raw.split()[0] if current_raw else ""
-    if not token:
-        return None, combined
-
-    try:
-        return float(parse_shutter(token)), combined
-    except Exception:
-        try:
-            return float(token), combined
-        except Exception:
-            return None, combined
-
-
-def shutter_to_gphoto_text(seconds: float) -> str:
-    text = format_shutter(seconds)
-    # gphoto radio choices typically use "1" (not "1/1") and no trailing "s".
-    if text.endswith("s"):
-        text = text[:-1]
-    if text == "1/1":
-        return "1"
-    return text
-
-
-def apply_shutter_with_backcheck(
-    previous_shutter_s: float,
-    requested_shutter_s: float,
-) -> Tuple[bool, float, str]:
-    requested_text = resolve_shutter_choice_token(float(requested_shutter_s))
-    ok, msg = apply_setting("shutterspeed", requested_text)
-    if not ok:
-        return False, requested_shutter_s, msg
-
-    actual_shutter_s, read_msg = read_current_shutter()
-    if actual_shutter_s is None:
-        return True, requested_shutter_s, ""
-
-    requested_norm = float(nearest_stop(float(requested_shutter_s), DEFAULT_SHUTTER_STOPS))
-    actual_norm = float(nearest_stop(float(actual_shutter_s), DEFAULT_SHUTTER_STOPS))
-    previous_norm = float(nearest_stop(float(previous_shutter_s), DEFAULT_SHUTTER_STOPS))
-    if abs(actual_norm - requested_norm) <= 1e-9:
-        return True, actual_norm, ""
-
-    retry_ok, retry_msg = apply_setting("shutterspeed", requested_text)
-    if not retry_ok:
-        combined_error = "\n".join(part for part in [msg, read_msg, retry_msg] if part).strip()
-        return False, actual_norm, combined_error
-
-    retried_actual_shutter_s, retried_read_msg = read_current_shutter()
-    if retried_actual_shutter_s is not None:
-        actual_norm = float(nearest_stop(float(retried_actual_shutter_s), DEFAULT_SHUTTER_STOPS))
-        read_msg = retried_read_msg
-
-    if abs(actual_norm - requested_norm) <= 1e-9:
-        return True, actual_norm, ""
-
-    if abs(actual_norm - previous_norm) <= 1e-9:
-        note = (
-            f"Requested shutter {requested_text} but camera remained at "
-            f"{format_shutter(actual_norm)}; using reported shutter value."
-        )
-    else:
-        note = (
-            f"Requested shutter {requested_text} but camera applied "
-            f"{format_shutter(actual_norm)}; using reported shutter value."
-        )
-    return True, actual_norm, note
-
-
-def apply_fstop_with_backcheck(
-    previous_fstop: float,
-    requested_fstop: float,
-    fstop_stops: Sequence[float],
-) -> Tuple[bool, float, str]:
-    requested_token = resolve_fstop_choice_token(float(requested_fstop))
-    ok, msg = apply_setting("f-number", requested_token)
-    if not ok:
-        return False, requested_fstop, msg
-
-    actual_fstop, read_msg = read_current_fstop()
-    if actual_fstop is None:
-        return True, requested_fstop, ""
-
-    # Brightening means moving to a smaller f-number (e.g. 16 -> 14 -> 13).
-    if requested_fstop < previous_fstop and actual_fstop < (requested_fstop - 1e-6):
-        retry_ok, retry_msg = apply_setting("f-number", requested_token)
-        if not retry_ok:
-            combined_error = "\n".join(part for part in [msg, read_msg, retry_msg] if part).strip()
-            return False, actual_fstop, combined_error
-
-        retried_actual_fstop, retried_read_msg = read_current_fstop()
-        if retried_actual_fstop is not None:
-            actual_fstop = retried_actual_fstop
-            read_msg = retried_read_msg
-
-        if actual_fstop < (requested_fstop - 1e-6):
-            note = (
-                f"Requested f/{requested_fstop} but camera remained at f/{actual_fstop}; "
-                "intermediate stop appears unavailable."
-            )
-            nearest_known = min(fstop_stops, key=lambda v: abs(float(v) - actual_fstop))
-            return True, float(nearest_known), note
-
-        note = f"Camera initially skipped past f/{requested_fstop}, retry succeeded at f/{actual_fstop}."
-        nearest_known = min(fstop_stops, key=lambda v: abs(float(v) - actual_fstop))
-        return True, float(nearest_known), note
-
-    nearest_known = min(fstop_stops, key=lambda v: abs(float(v) - actual_fstop))
-    return True, float(nearest_known), ""
 
 
 def converged(metrics: AnalysisMetrics, deadband_ev: float) -> bool:
@@ -365,70 +223,6 @@ def converged(metrics: AnalysisMetrics, deadband_ev: float) -> bool:
         and metrics.highlight_clip_pct <= 1.0
         and metrics.shadow_clip_pct <= 2.0
     )
-
-
-def dashboard_recommends_optimized(metrics: AnalysisMetrics, deadband_ev: float) -> bool:
-    # Keep this aligned with the dashboard recommendation logic.
-    highlight_darken_pct = 2.5
-    shadow_brighten_pct = 2.0
-
-    if metrics.delta_ev > deadband_ev:
-        return metrics.highlight_clip_pct >= highlight_darken_pct
-    if metrics.delta_ev < -deadband_ev:
-        return False
-    if metrics.highlight_clip_pct >= highlight_darken_pct:
-        return False
-    if metrics.shadow_clip_pct >= shadow_brighten_pct:
-        return False
-    return True
-
-
-DAY_APERTURE_BIAS_TARGET_FSTOP = 5.6
-DAY_APERTURE_BIAS_FAST_SHUTTER_S = 1.0 / 1000.0
-
-
-def next_higher_fstop(current_fstop: float, fstop_stops: Sequence[float]) -> Optional[float]:
-    ordered = sorted({float(v) for v in fstop_stops})
-    for value in ordered:
-        if value > current_fstop * (1.0 + 1e-9):
-            return value
-    return None
-
-
-def next_fstop_value(current_fstop: float, fstop_stops: Sequence[float], brighten: bool) -> Optional[float]:
-    """Return the next aperture stop.
-
-    For aperture, brightness direction is inverted versus ISO/shutter:
-    smaller f-number brightens, larger f-number darkens.
-    """
-    ordered = sorted({float(v) for v in fstop_stops})
-    if brighten:
-        for value in reversed(ordered):
-            if value < current_fstop * (1.0 - 1e-9):
-                return value
-        return None
-    for value in ordered:
-        if value > current_fstop * (1.0 + 1e-9):
-            return value
-    return None
-
-
-def should_apply_day_aperture_bias(
-    *,
-    startup_tune_pending: bool,
-    effective_lock_aperture: bool,
-    current_iso: int,
-    iso_min: int,
-    current_shutter_s: float,
-    current_fstop: float,
-) -> bool:
-    if startup_tune_pending or effective_lock_aperture:
-        return False
-    if current_iso > iso_min:
-        return False
-    if current_shutter_s > DAY_APERTURE_BIAS_FAST_SHUTTER_S:
-        return False
-    return current_fstop < (DAY_APERTURE_BIAS_TARGET_FSTOP - 1e-6)
 
 
 def append_reject_log(
@@ -476,37 +270,18 @@ def append_reject_log(
         )
 
 
-def copy_keeper_image(image_path: Path, keep_dir: Path) -> Path:
+def copy_keeper_image(image_path: Path, keep_dir: Path, tag: Optional[str] = None) -> Path:
     keep_dir.mkdir(parents=True, exist_ok=True)
-
-    suffix = image_path.suffix if image_path.suffix else ".jpg"
-    key = str(keep_dir.resolve())
-
-    with KEEPER_SEQUENCE_LOCK:
-        next_index = KEEPER_NEXT_INDEX_BY_DIR.get(key)
-        if next_index is None:
-            max_seen = 0
-            for entry in keep_dir.iterdir():
-                if not entry.is_file():
-                    continue
-                match = KEEPER_NAME_RE.match(entry.name)
-                if not match:
-                    continue
-                try:
-                    value = int(match.group(1))
-                except Exception:
-                    continue
-                if value > max_seen:
-                    max_seen = value
-            next_index = max_seen + 1
-
-        dst = keep_dir / f"timelapse_{next_index:06d}{suffix}"
-        while dst.exists():
-            next_index += 1
-            dst = keep_dir / f"timelapse_{next_index:06d}{suffix}"
-
-        KEEPER_NEXT_INDEX_BY_DIR[key] = next_index + 1
-
+    stem = image_path.stem
+    if tag:
+        clean_tag = str(tag).strip().replace(" ", "_")
+        if clean_tag and not stem.endswith(f"_{clean_tag}"):
+            stem = f"{stem}_{clean_tag}"
+    dst = keep_dir / f"{stem}{image_path.suffix}"
+    if dst.exists():
+        suffix = image_path.suffix
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dst = keep_dir / f"{stem}_{timestamp}{suffix}"
     shutil.copy2(image_path, dst)
     return dst
 
@@ -523,73 +298,13 @@ def is_transient_capture_error(output_text: str) -> bool:
     return any(marker in text for marker in markers)
 
 
-def has_explicit_capture_failure(output_text: str) -> bool:
+def is_read_only_config_error(output_text: str, config_name: Optional[str] = None) -> bool:
     text = (output_text or "").lower()
-    markers = [
-        "error: could not capture image",
-        "error: could not capture",
-    ]
-    return any(marker in text for marker in markers)
-
-
-def has_no_camera_error(output_text: str) -> bool:
-    return "no camera found" in (output_text or "").lower()
-
-
-def preflight_camera_capture() -> Tuple[bool, str]:
-    result = run_gphoto(["--capture-image"], timeout=30)
-    combined = (result.stdout + "\n" + result.stderr).strip()
-    if result.returncode == 0 and not has_explicit_capture_failure(combined):
-        return True, combined
-
-    if has_no_camera_error(combined):
-        message = (
-            "No camera was detected by gphoto2. Check USB cable/power, verify the camera is in PC Remote/PTP mode, "
-            "close any app that may own the camera, and run 'gphoto2 --auto-detect'."
-        )
-        return False, message + ("\n" + combined if combined else "")
-
-    if has_explicit_capture_failure(combined) or is_transient_capture_error(combined):
-        message = (
-            "Sony/Linux still capture is unavailable in the current camera state. "
-            "Check camera menu: USB Connection=PC Remote, PC Remote Function=On, "
-            "USB Streaming=Off, then power-cycle and retry."
-        )
-        return False, message + ("\n" + combined if combined else "")
-
-    return False, combined
-
-
-def capture_single_frame(workdir: Path, keep_on_camera: bool, capture_timeout: int) -> Tuple[bool, str, Optional[Path]]:
-    before_capture_files = {p.name for p in workdir.iterdir() if p.is_file()}
-    capture_args = ["--capture-image-and-download"]
-    if keep_on_camera:
-        capture_args.append("--keep")
-    cap = run_gphoto(capture_args, timeout=capture_timeout)
-    cap_output = (cap.stdout + "\n" + cap.stderr).strip()
-
-    if cap.returncode != 0 or has_explicit_capture_failure(cap_output):
-        return False, cap_output, None
-
-    image_path = parse_downloaded_filename(cap_output)
-    if image_path is None:
-        after_capture_files = [p for p in workdir.iterdir() if p.is_file()]
-        new_candidates = [
-            p for p in after_capture_files
-            if p.name not in before_capture_files
-            and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".arw", ".cr2", ".cr3", ".nef", ".dng"}
-        ]
-        if new_candidates:
-            image_path = max(new_candidates, key=lambda p: p.stat().st_mtime)
-        else:
-            image_path = newest_image_in_dir(workdir)
-    elif not image_path.is_absolute():
-        image_path = workdir / image_path
-
-    if image_path is None or not image_path.exists():
-        return False, cap_output, None
-
-    return True, cap_output, image_path
+    if "read only" not in text:
+        return False
+    if config_name is None:
+        return True
+    return config_name.lower() in text
 
 
 def next_stop_value(current: float, stops: Sequence[float], brighten: bool) -> Optional[float]:
@@ -605,13 +320,24 @@ def next_stop_value(current: float, stops: Sequence[float], brighten: bool) -> O
     return None
 
 
+def stepped_stop_value(current: float, stops: Sequence[float], brighten: bool, steps: int) -> Optional[float]:
+    """Move by up to `steps` stop entries in the requested direction."""
+    steps = max(1, int(steps))
+    value = current
+    moved = False
+    for _ in range(steps):
+        nxt = next_stop_value(value, stops, brighten=brighten)
+        if nxt is None:
+            break
+        value = nxt
+        moved = True
+    if not moved:
+        return None
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Auto-tune camera exposure using iterative captures.")
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable gphoto2 debug logging to gphoto2-debug.log in the current working directory.",
-    )
     parser.add_argument("--workdir", default=".", help="Directory where captures are downloaded.")
     parser.add_argument("--max-iterations", type=int, default=6, help="Max capture/adjust iterations.")
     parser.add_argument(
@@ -621,19 +347,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep each captured image on camera storage after download.",
     )
     parser.add_argument(
-        "--capture-only",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Take one capture-and-download and exit without tuning.",
-    )
-    parser.add_argument(
         "--capture-timeout",
         type=int,
         default=90,
         help="Timeout in seconds for each gphoto2 capture/download command.",
     )
     parser.add_argument("--duration-minutes", type=float, default=None, help="Optional run duration in minutes.")
-    parser.add_argument("--interval-seconds", type=int, default=0, help="Seconds between captures (0 = no enforced interval).")
+    parser.add_argument(
+        "--interval-seconds",
+        type=int,
+        default=0,
+        help="Seconds between captures. Any value > 0 runs timed mode continuously (unless --duration-minutes is set).",
+    )
     parser.add_argument(
         "--startup-tune-shot",
         action=argparse.BooleanOptionalAction,
@@ -654,12 +379,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-priority",
-        choices=["low-iso", "fast-brighten"],
+        choices=["low-iso", "fast-brighten", "star-hunt"],
         default="low-iso",
         help=(
             "Startup tuning priority: 'low-iso' keeps ISO as low as possible and adjusts shutter first; "
-            "'fast-brighten' raises ISO first to converge faster in very dark scenes."
+            "'fast-brighten' raises ISO first to converge faster in very dark scenes; "
+            "'star-hunt' jumps to a long shutter first, then sweeps aperture before ISO."
         ),
+    )
+    parser.add_argument(
+        "--star-hunt-aperture-jump-stops",
+        type=int,
+        default=2,
+        help="Aperture stop entries to jump per brighten step in startup-priority=star-hunt.",
     )
     parser.add_argument(
         "--startup-retry-seconds",
@@ -691,15 +423,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--keep-mode",
-        choices=["optimal", "all"],
+        choices=["optimal", "all", "best-effort"],
         default="optimal",
-        help="Frame copy policy for keep-dir: 'optimal' copies only converged frames, 'all' copies every frame.",
-    )
-    parser.add_argument(
-        "--stop-on-optimal",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Exit immediately once an optimal frame is reached.",
+        help=(
+            "Frame copy policy for keep-dir: "
+            "'optimal' copies only converged frames, "
+            "'all' copies every frame, "
+            "'best-effort' guarantees one saved keeper per timed interval "
+            "and tags non-optimal frames as fallback."
+        ),
     )
 
     parser.add_argument("--target-luma", type=float, default=118.0)
@@ -749,7 +481,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shutter-min", default="1/1000")
     parser.add_argument("--shutter-max", default="1/30")
     parser.add_argument("--iso-min", type=int, default=100)
-    parser.add_argument("--iso-max", type=int, default=51200)
+    parser.add_argument("--iso-max", type=int, default=6400)
     parser.add_argument("--lock-aperture", action="store_true", default=False)
     parser.add_argument(
         "--startup-set-baseline",
@@ -782,35 +514,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    global GPHOTO_DEBUG
     args = build_parser().parse_args()
-    GPHOTO_DEBUG = bool(args.debug)
-
-    # Keep camera daemons from grabbing the USB interface during long runs.
-    if sys.platform == "darwin":
-        start_macos_daemon_suppressor(interval_s=0.2)
 
     workdir = Path(args.workdir).expanduser().resolve()
     if not workdir.exists() or not workdir.is_dir():
         print(f"error: invalid --workdir: {workdir}", file=sys.stderr)
         return 2
-
-    if args.capture_only:
-        ok, cap_output, image_path = capture_single_frame(workdir, args.keep_on_camera, args.capture_timeout)
-        if not ok:
-            print("error: capture-only failed", file=sys.stderr)
-            if cap_output:
-                print(cap_output)
-            return 1
-        print(f"Captured: {image_path.name}")
-        return 0
-
-    ok, preflight_message = preflight_camera_capture()
-    if not ok:
-        print("error: camera preflight failed", file=sys.stderr)
-        if preflight_message:
-            print(preflight_message)
-        return 1
 
     try:
         shutter_min_s = parse_shutter(args.shutter_min)
@@ -830,43 +539,55 @@ def main() -> int:
     iso_stops = iso_stops_override if iso_stops_override else [float(v) for v in DEFAULT_ISO_STOPS]
     shutter_stops = shutter_stops_override if shutter_stops_override else list(DEFAULT_SHUTTER_STOPS)
     fstop_stops = fstop_stops_override if fstop_stops_override else list(DEFAULT_FSTOP_STOPS)
+    fstop_stops = sorted({float(f) for f in fstop_stops if float(f) >= 1.4})
+    if not fstop_stops:
+        print("error: no usable f-stop values remain after filtering lens minimum", file=sys.stderr)
+        return 2
 
     if args.startup_set_baseline:
         startup_iso = args.startup_iso if args.startup_iso is not None else int(args.iso_min)
-        startup_fstop = args.startup_fstop if args.startup_fstop is not None else float(max(fstop_stops))
-        startup_shutter = args.startup_shutter
+        # Default: widest aperture (min f-stop) and longest shutter for best light gathering.
+        startup_fstop = args.startup_fstop if args.startup_fstop is not None else float(min(fstop_stops))
+        startup_shutter = args.startup_shutter if args.startup_shutter is not None else format_shutter(shutter_max_s)
 
-        print(f"Applying startup baseline ISO: {startup_iso}")
+        print(f"Applying startup baseline: ISO={startup_iso}, shutter={startup_shutter}, f/{startup_fstop}")
         ok, msg = apply_setting("iso", str(startup_iso))
         print("Set startup ISO:", "ok" if ok else "failed")
         if not ok and msg:
             print(msg)
 
-        print(f"Applying startup baseline f-stop: f/{startup_fstop}")
         ok, msg = apply_setting("f-number", f"{startup_fstop}")
         print("Set startup f-stop:", "ok" if ok else "failed")
         if not ok and msg:
             print(msg)
 
-        if startup_shutter:
-            print(f"Applying startup baseline shutter: {startup_shutter}")
-            ok, msg = apply_setting("shutterspeed", str(startup_shutter))
-            print("Set startup shutter:", "ok" if ok else "failed")
-            if not ok and msg:
-                print(msg)
+        ok, msg = apply_setting("shutterspeed", str(startup_shutter))
+        print("Set startup shutter:", "ok" if ok else "failed")
+        if not ok and msg:
+            print(msg)
 
     last_iso: Optional[int] = None
     last_shutter_s: Optional[float] = None
     last_fstop: Optional[float] = None
+    last_recommendation: Optional[tuple[int, float, float]] = None
+    repeated_recommendation_count = 0
     # Oscillation detection: track last N (iso, shutter, fstop) tuples applied.
     settings_history: list = []
     OSCILLATION_WINDOW = 4
     reject_log_path = (workdir / args.reject_log).resolve()
-    keep_dir_path = (workdir / args.keep_dir).resolve()
+    # Auto-generate a timestamped keep-dir nested inside the timelapse root so
+    # it appears in the timelapse-directories UI.
+    # Structure: timelapse/timelapse_YYYYMMDD_HHMMSS/optimal/
+    keep_dir_name = args.keep_dir
+    if keep_dir_name == "timelapse":
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        keep_dir_path = (workdir / "timelapse" / f"timelapse_{ts}" / "optimal").resolve()
+    else:
+        keep_dir_path = (workdir / keep_dir_name).resolve()
 
     calibration_only_mode = args.duration_minutes is not None and args.duration_minutes <= 0
-    timed_mode = args.duration_minutes is not None and args.duration_minutes > 0
-    if timed_mode:
+    timed_mode = args.interval_seconds > 0 or (args.duration_minutes is not None and args.duration_minutes > 0)
+    if args.duration_minutes is not None and args.duration_minutes > 0:
         end_time = time.time() + (args.duration_minutes * 60.0)
     else:
         end_time = None
@@ -874,12 +595,14 @@ def main() -> int:
     startup_attempts = 0
     consecutive_capture_failures = 0
     settled_mode = False
-    severe_highlight_clip_pct = 6.0
+    best_effort_mode = args.keep_mode == "best-effort"
+    pre_capture_busy_failures = 0
+    last_capture_fingerprint: Optional[tuple[str, int, int]] = None
+    stale_capture_retries = 0
 
     next_capture_at = time.time()
     iteration = 0
     first_capture_pending = True
-
     print("Starting auto-tune loop...")
     while True:
         if end_time is not None and time.time() >= end_time:
@@ -896,6 +619,30 @@ def main() -> int:
             print(f"Waiting {wait_s:.1f}s before next capture...")
             time.sleep(wait_s)
 
+        # Guard capture start: if the camera is still flushing long-exposure
+        # buffers or in-camera processing, do not trigger a new frame yet.
+        if last_shutter_s is not None and last_shutter_s > 1.0:
+            pre_cap_wait = max(8.0, last_shutter_s + 8.0)
+            if not wait_for_camera_ready(max_wait_s=pre_cap_wait, poll_interval_s=1.0):
+                pre_capture_busy_failures += 1
+                if pre_capture_busy_failures >= 3:
+                    print(
+                        "Camera readiness probe failed repeatedly, but this can be a false busy state. "
+                        "Attempting capture anyway."
+                    )
+                    pre_capture_busy_failures = 0
+                else:
+                    retry_wait = max(3.0, float(args.capture_retry_seconds))
+                    print(
+                        f"Camera still busy before capture after {pre_cap_wait:.0f}s; "
+                        f"retrying in {retry_wait:.1f}s."
+                    )
+                    next_capture_at = time.time() + retry_wait
+                    first_capture_pending = False
+                    continue
+            else:
+                pre_capture_busy_failures = 0
+
         iteration += 1
         if timed_mode:
             print(f"\nIteration {iteration} (timed mode)")
@@ -910,8 +657,7 @@ def main() -> int:
         cap = run_gphoto(capture_args, timeout=args.capture_timeout)
         first_capture_pending = False
         cap_output = (cap.stdout + "\n" + cap.stderr).strip()
-        capture_failed = cap.returncode != 0 or has_explicit_capture_failure(cap_output)
-        if capture_failed:
+        if cap.returncode != 0:
             print("Capture failed:")
             print(cap_output)
             if is_transient_capture_error(cap_output):
@@ -965,6 +711,55 @@ def main() -> int:
 
         print(f"Captured: {image_path.name}")
 
+        # Wait until the downloaded file has fully landed on disk (size stable
+        # for 1.5s). This covers USB transfer completion.
+        max_file_wait = max(10.0, (last_shutter_s or 0) * 2.0 + 10.0)
+        stable = wait_for_file_stable(image_path, stable_for_s=1.5, max_wait_s=max_file_wait)
+        if not stable:
+            print(f"File did not stabilise in {max_file_wait:.0f}s, proceeding anyway.")
+
+        # Guard against stale frame reuse: if the downloaded file is identical
+        # to the previous iteration (same name/size/mtime), retry capture
+        # instead of re-analyzing old pixels.
+        try:
+            st = image_path.stat()
+            capture_fingerprint = (image_path.name, int(st.st_size), int(st.st_mtime_ns))
+        except FileNotFoundError:
+            capture_fingerprint = None
+
+        use_last_applied_settings = False
+        if capture_fingerprint is not None and capture_fingerprint == last_capture_fingerprint:
+            stale_capture_retries += 1
+            if stale_capture_retries < 3:
+                retry_wait = max(3.0, float(args.capture_retry_seconds))
+                print(
+                    "Downloaded frame appears unchanged from previous capture; "
+                    f"retrying capture in {retry_wait:.1f}s."
+                )
+                next_capture_at = time.time() + retry_wait
+                continue
+            print(
+                "Downloaded frame is still unchanged after repeated retries; "
+                "proceeding with analysis and using last applied camera settings."
+            )
+            stale_capture_retries = 0
+            use_last_applied_settings = True
+        else:
+            stale_capture_retries = 0
+
+        if capture_fingerprint is not None:
+            last_capture_fingerprint = capture_fingerprint
+
+        # For long exposures, also wait until the camera itself is responsive
+        # (in-camera NR processing finishes after file transfer).
+        if last_shutter_s is not None and last_shutter_s > 2.0:
+            nr_max = last_shutter_s + 5.0
+            ready = wait_for_camera_ready(max_wait_s=nr_max, poll_interval_s=1.5)
+            if not ready:
+                print(
+                    f"Camera still reports busy after {nr_max:.0f}s; proceeding with analysis/tuning anyway."
+                )
+
         suppress_keeper_this_frame = startup_tune_pending and timed_mode
         if startup_tune_pending:
             startup_attempts += 1
@@ -977,9 +772,14 @@ def main() -> int:
         metrics = analyze_image(image_path=image_path, target_luma=args.target_luma)
         exif_iso, exif_shutter_s, exif_fstop = read_capture_settings_from_exif(image_path)
 
-        current_iso = exif_iso if exif_iso is not None else last_iso
-        current_shutter_s = exif_shutter_s if exif_shutter_s is not None else last_shutter_s
-        current_fstop = exif_fstop if exif_fstop is not None else last_fstop
+        if use_last_applied_settings and last_iso is not None and last_shutter_s is not None:
+            current_iso = last_iso
+            current_shutter_s = last_shutter_s
+            current_fstop = last_fstop
+        else:
+            current_iso = exif_iso if exif_iso is not None else last_iso
+            current_shutter_s = exif_shutter_s if exif_shutter_s is not None else last_shutter_s
+            current_fstop = exif_fstop if exif_fstop is not None else last_fstop
 
         if current_iso is None or current_shutter_s is None:
             print("error: missing ISO or shutter metadata and no previous value to fall back to", file=sys.stderr)
@@ -1013,24 +813,35 @@ def main() -> int:
         else:
             optimal_now = converged(metrics, active_deadband_ev)
 
-        if args.stop_on_optimal and dashboard_recommends_optimized(metrics, active_deadband_ev):
-            if not copied_this_iteration:
-                copied_path = copy_keeper_image(image_path, keep_dir_path)
-                copied_this_iteration = True
-                print(f"Keeper saved: {copied_path.name}")
-            print("Dashboard recommendation is Optimized. Stopping by --stop-on-optimal.")
-            return 0
+        # If star-hunt startup is clearly seeing dawn/daylight, stop treating
+        # frames as startup tuning shots and switch to normal daytime control.
+        if (
+            startup_tune_pending
+            and args.startup_priority == "star-hunt"
+            and (
+                metrics.highlight_clip_pct >= 25.0
+                or metrics.median_luma >= 245.0
+                or (
+                    metrics.delta_ev < -0.75
+                    and current_shutter_s >= 8.0
+                    and float(current_fstop) <= 2.0
+                )
+            )
+        ):
+            startup_tune_pending = False
+            active_deadband_ev = args.deadband_ev
+            optimal_now = converged(metrics, active_deadband_ev)
+            print(
+                "Dawn/daylight detected during star startup; switching to normal exposure control."
+            )
 
         if startup_tune_pending and optimal_now:
-            if calibration_only_mode or args.stop_on_optimal:
+            if calibration_only_mode:
                 startup_tune_pending = False
                 if not copied_this_iteration:
                     copied_path = copy_keeper_image(image_path, keep_dir_path)
                     print(f"Keeper saved: {copied_path.name}")
-                if args.stop_on_optimal and not calibration_only_mode:
-                    print("Optimal frame reached. Stopping by --stop-on-optimal.")
-                else:
-                    print("Calibration complete.")
+                print("Calibration complete.")
                 return 0
             startup_tune_pending = False
             print(
@@ -1057,40 +868,35 @@ def main() -> int:
                 print(f"Keeper saved: {copied_path.name}")
             print("Adjusted, all set.")
             return 0
-        day_aperture_bias_pending = False
         if optimal_now and timed_mode:
-            day_aperture_bias_pending = should_apply_day_aperture_bias(
-                startup_tune_pending=startup_tune_pending,
-                effective_lock_aperture=effective_lock_aperture,
-                current_iso=int(current_iso),
-                iso_min=int(args.iso_min),
-                current_shutter_s=float(current_shutter_s),
-                current_fstop=float(current_fstop),
-            )
             if not copied_this_iteration and not suppress_keeper_this_frame:
                 copied_path = copy_keeper_image(image_path, keep_dir_path)
                 print(f"Keeper saved: {copied_path.name}")
                 settled_mode = True
-            if args.stop_on_optimal:
-                if suppress_keeper_this_frame and not copied_this_iteration:
-                    copied_path = copy_keeper_image(image_path, keep_dir_path)
-                    print(f"Keeper saved: {copied_path.name}")
-                print("Optimal frame reached. Stopping by --stop-on-optimal.")
-                return 0
             if args.interval_seconds > 0:
                 next_capture_at = time.time() + args.interval_seconds
             print("Frame is optimal. Continuing timed capture loop.")
-            if day_aperture_bias_pending:
-                print(
-                    "Day aperture bias: rebalancing exposure toward higher f-stop "
-                    "for deeper depth of field."
-                )
+
+        if timed_mode and best_effort_mode and not suppress_keeper_this_frame and not copied_this_iteration:
+            keeper_tag = None if optimal_now else "fallback"
+            copied_path = copy_keeper_image(image_path, keep_dir_path, tag=keeper_tag)
+            copied_this_iteration = True
+            if keeper_tag:
+                print(f"Keeper saved (fallback): {copied_path.name}")
+            else:
+                print(f"Keeper saved (optimal): {copied_path.name}")
 
         if (timed_mode or calibration_only_mode) and not optimal_now:
             if startup_tune_pending:
                 wait_s = max(0.0, float(args.startup_retry_seconds))
                 next_capture_at = time.time() + wait_s
                 print(f"Startup calibration in progress. Retrying in {wait_s:.1f}s.")
+            elif timed_mode and best_effort_mode and args.interval_seconds > 0:
+                next_capture_at = time.time() + args.interval_seconds
+                print(
+                    "Best-effort cadence active. Saved fallback keeper for this interval "
+                    "and continuing fixed interval capture."
+                )
             elif (
                 settled_mode
                 and abs(metrics.delta_ev) <= args.settled_breakout_ev
@@ -1104,31 +910,15 @@ def main() -> int:
             elif args.interval_seconds > 0:
                 print("Frame is not optimal. Retrying immediately until a keeper is found.")
 
-        if optimal_now and timed_mode and not day_aperture_bias_pending:
+        if optimal_now and timed_mode:
             continue
 
         if startup_tune_pending:
             active_max_step_ev = args.startup_max_step_ev
-        elif abs(metrics.delta_ev) >= args.aggressive_breakout_ev:
-            # When far off target, take bigger jumps (2-3 stop style moves)
-            # and then naturally fall back to smoother behavior near target.
-            active_max_step_ev = max(args.max_step_ev, args.aggressive_max_step_ev)
         elif settled_mode and abs(metrics.delta_ev) <= args.settled_breakout_ev:
             active_max_step_ev = min(args.max_step_ev, args.settled_max_step_ev)
         else:
             active_max_step_ev = args.max_step_ev
-
-        # When startup frames are near-black, allow larger aperture jumps so we
-        # reach usable exposure quickly instead of walking one f-stop at a time.
-        if startup_tune_pending:
-            if metrics.median_luma <= 2.0 or metrics.delta_ev >= 4.0:
-                startup_aperture_step_budget = 4
-            elif metrics.delta_ev >= 2.0:
-                startup_aperture_step_budget = 3
-            else:
-                startup_aperture_step_budget = 2
-        else:
-            startup_aperture_step_budget = 1
 
         rec = recommend_settings(
             metrics=metrics,
@@ -1154,32 +944,64 @@ def main() -> int:
             force_iso_first_when_brightening=(
                 startup_tune_pending and args.startup_priority == "fast-brighten"
             ),
-            force_aperture_first_when_brightening=False,
+            force_aperture_first_when_brightening=(
+                startup_tune_pending and args.startup_priority in ("low-iso", "star-hunt")
+            ),
+            # Brightening priority: shutter longer → aperture wider → ISO last.
             prefer_aperture_last=False,
-            max_aperture_stop_steps=startup_aperture_step_budget,
         )
 
-        if day_aperture_bias_pending:
-            target_fstop = float(DAY_APERTURE_BIAS_TARGET_FSTOP)
-            next_f = next_higher_fstop(float(current_fstop), fstop_stops)
-            if next_f is not None:
-                if next_f > target_fstop:
-                    next_f = target_fstop
-                nearest_target = min(fstop_stops, key=lambda v: abs(float(v) - next_f))
-                next_f = float(nearest_target)
+        if startup_tune_pending and args.startup_priority == "star-hunt" and not optimal_now:
+            bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
+            star_target_shutter = shutter_max_s
+            min_fstop = min(float(f) for f in fstop_stops) if fstop_stops else float(current_fstop)
 
-                if next_f > float(current_fstop) and not effective_lock_aperture:
-                    aperture_ev = -2.0 * math.log2(max(next_f, 1e-9) / max(float(current_fstop), 1e-9))
-                    compensating_shutter = float(current_shutter_s) * (2.0 ** (-aperture_ev))
-                    compensating_shutter = clamp(compensating_shutter, shutter_min_s, shutter_max_s)
-                    compensating_shutter = nearest_stop(compensating_shutter, shutter_stops)
-
-                    rec.action = "day_aperture_bias"
-                    rec.reason = "daylight depth-of-field bias"
-                    rec.suggested_iso = int(current_iso)
-                    rec.suggested_fstop = float(next_f)
-                    rec.suggested_shutter_s = float(compensating_shutter)
-                    rec.applied_ev_step = 0.0
+            if metrics.delta_ev > active_deadband_ev:
+                # For night startup, snap directly to max shutter and widest
+                # available aperture before touching ISO.
+                if current_shutter_s + 1e-9 < star_target_shutter:
+                    rec.suggested_shutter_s = star_target_shutter
+                    print(
+                        "Star-hunt override: jumping shutter to "
+                        f"{format_shutter(star_target_shutter)} before aperture/ISO sweep."
+                    )
+                if not effective_lock_aperture and float(current_fstop) - min_fstop > 1e-6:
+                    rec.suggested_fstop = min_fstop
+                    print(
+                        "Star-hunt override: opening aperture to minimum available "
+                        f"f/{current_fstop} -> f/{rec.suggested_fstop}."
+                    )
+                if rec.suggested_shutter_s == current_shutter_s and rec.suggested_fstop == current_fstop:
+                    nudged_iso = next_stop_value(float(current_iso), iso_stops, brighten=True)
+                    if nudged_iso is not None and nudged_iso <= float(args.iso_max):
+                        rec.suggested_iso = int(round(nudged_iso))
+                        print(f"Star-hunt override: raising ISO one stop to {rec.suggested_iso}.")
+            elif metrics.delta_ev < -active_deadband_ev or (
+                metrics.highlight_clip_pct > 1.0 and metrics.delta_ev <= 0.0
+            ):
+                # After overshoot, back down aperture first, then shutter/ISO.
+                if not effective_lock_aperture:
+                    current_f = float(current_fstop)
+                    higher_f_candidates = sorted([f for f in fstop_stops if f > current_f])
+                    if higher_f_candidates:
+                        rec.suggested_fstop = float(higher_f_candidates[0])
+                        print(
+                            "Star-hunt override: backing down aperture one stop "
+                            f"f/{current_fstop} -> f/{rec.suggested_fstop}."
+                        )
+                if rec.suggested_fstop == current_fstop:
+                    darker_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=False)
+                    if darker_shutter is not None:
+                        rec.suggested_shutter_s = darker_shutter
+                        print(
+                            "Star-hunt override: backing down shutter one stop "
+                            f"to {format_shutter(darker_shutter)}."
+                        )
+                if rec.suggested_fstop == current_fstop and rec.suggested_shutter_s == current_shutter_s:
+                    darker_iso = next_stop_value(float(current_iso), iso_stops, brighten=False)
+                    if darker_iso is not None and darker_iso >= float(args.iso_min):
+                        rec.suggested_iso = int(round(darker_iso))
+                        print(f"Star-hunt override: lowering ISO one stop to {rec.suggested_iso}.")
 
         print(
             "Recommend: "
@@ -1190,33 +1012,63 @@ def main() -> int:
             f"ev_step={rec.applied_ev_step:.3f}"
         )
 
+        current_recommendation = (
+            int(rec.suggested_iso),
+            float(rec.suggested_shutter_s),
+            float(rec.suggested_fstop),
+        )
+        if last_recommendation == current_recommendation:
+            repeated_recommendation_count += 1
+        else:
+            repeated_recommendation_count = 0
+
+        # If we recommend the exact same tuple repeatedly, skip the extra
+        # retries and force a one-stop aperture move immediately.
+        if (
+            startup_tune_pending
+            and args.startup_priority == "star-hunt"
+            and repeated_recommendation_count >= 1
+            and not optimal_now
+            and not effective_lock_aperture
+        ):
+            if rec.action in ('darken', 'speed_up_shutter'):
+                f_candidate = next_stop_value(rec.suggested_fstop, fstop_stops, brighten=True)
+            else:
+                f_candidate = next_stop_value(rec.suggested_fstop, fstop_stops, brighten=False)
+            if f_candidate is not None and f_candidate != rec.suggested_fstop:
+                print(
+                    "Repeated recommendation detected: forcing immediate f-stop step "
+                    f"f/{rec.suggested_fstop} -> f/{f_candidate}."
+                )
+                rec.suggested_fstop = f_candidate
+                current_recommendation = (
+                    int(rec.suggested_iso),
+                    float(rec.suggested_shutter_s),
+                    float(rec.suggested_fstop),
+                )
+
         if startup_tune_pending and not optimal_now and abs(rec.applied_ev_step) < 1e-6:
             bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
             if metrics.delta_ev > active_deadband_ev:
-                if metrics.highlight_clip_pct >= severe_highlight_clip_pct:
+                nudged_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=True)
+                if nudged_shutter is not None:
+                    rec.suggested_shutter_s = nudged_shutter
                     print(
-                        "Startup nudge skipped: brighten request conflicts with severe highlight clipping."
+                        "Startup nudge: forcing brighter shutter stop "
+                        f"{format_shutter(nudged_shutter)}"
                     )
                 else:
-                    nudged_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=True)
-                    if nudged_shutter is not None:
-                        rec.suggested_shutter_s = nudged_shutter
-                        print(
-                            "Startup nudge: forcing brighter shutter stop "
-                            f"{format_shutter(nudged_shutter)}"
-                        )
-                    else:
-                        if args.startup_priority == "low-iso" and not effective_lock_aperture:
-                            current_f = float(current_fstop)
-                            lower_f_candidates = sorted([f for f in fstop_stops if f < current_f])
-                            if lower_f_candidates:
-                                rec.suggested_fstop = float(lower_f_candidates[-1])
-                                print(f"Startup nudge: forcing wider aperture f/{rec.suggested_fstop}")
-                        if rec.suggested_fstop == current_fstop:
-                            nudged_iso = next_stop_value(float(current_iso), iso_stops, brighten=True)
-                            if nudged_iso is not None and nudged_iso <= float(args.iso_max):
-                                rec.suggested_iso = int(round(nudged_iso))
-                                print(f"Startup nudge: forcing brighter ISO stop {rec.suggested_iso}")
+                    if args.startup_priority == "low-iso" and not effective_lock_aperture:
+                        current_f = float(current_fstop)
+                        lower_f_candidates = sorted([f for f in fstop_stops if f < current_f])
+                        if lower_f_candidates:
+                            rec.suggested_fstop = float(lower_f_candidates[-1])
+                            print(f"Startup nudge: forcing wider aperture f/{rec.suggested_fstop}")
+                    if rec.suggested_fstop == current_fstop:
+                        nudged_iso = next_stop_value(float(current_iso), iso_stops, brighten=True)
+                        if nudged_iso is not None and nudged_iso <= float(args.iso_max):
+                            rec.suggested_iso = int(round(nudged_iso))
+                            print(f"Startup nudge: forcing brighter ISO stop {rec.suggested_iso}")
             elif metrics.delta_ev < -active_deadband_ev or (
                 metrics.highlight_clip_pct > 1.0 and metrics.delta_ev <= 0.0
             ):
@@ -1243,120 +1095,55 @@ def main() -> int:
                 return 1
             changed = True
 
-        shutter_text = shutter_to_gphoto_text(rec.suggested_shutter_s)
-        current_shutter_text = shutter_to_gphoto_text(current_shutter_s)
-        shutter_change_requested = shutter_text != current_shutter_text
-        shutter_stuck_noop = False
+        shutter_text = format_shutter(rec.suggested_shutter_s)
+        current_shutter_text = format_shutter(current_shutter_s)
         if shutter_text != current_shutter_text:
             print(f"Applying: gphoto2 --set-config shutterspeed={shutter_text}")
-            ok, applied_shutter_s, msg = apply_shutter_with_backcheck(
-                previous_shutter_s=float(current_shutter_s),
-                requested_shutter_s=float(rec.suggested_shutter_s),
-            )
+            ok, msg = apply_setting("shutterspeed", shutter_text)
             print("Set shutter:", "ok" if ok else "failed")
             if not ok:
                 print(msg)
                 return 1
-            rec.suggested_shutter_s = float(applied_shutter_s)
-            if msg:
-                print(msg)
-            applied_shutter_text = shutter_to_gphoto_text(rec.suggested_shutter_s)
-            if applied_shutter_text != current_shutter_text:
-                changed = True
             else:
-                shutter_stuck_noop = True
-
-        # If shutter change was requested but the camera kept the same shutter,
-        # apply an alternate one-stop change now to avoid repeated no-op loops.
-        if shutter_change_requested and shutter_stuck_noop and not changed:
-            if rec.action in ("darken", "speed_up_shutter"):
-                iso_fallback = next_stop_value(float(current_iso), iso_stops, brighten=False)
-                if iso_fallback is not None and iso_fallback >= float(args.iso_min):
-                    fallback_iso = int(round(iso_fallback))
-                    if fallback_iso != int(current_iso):
-                        print(
-                            "Shutter remained unchanged; applying darker ISO fallback "
-                            f"{current_iso} -> {fallback_iso}."
-                        )
-                        ok, msg = apply_setting("iso", str(fallback_iso))
-                        print("Set ISO fallback:", "ok" if ok else "failed")
-                        if not ok:
-                            print(msg)
-                            return 1
-                        rec.suggested_iso = fallback_iso
-                        changed = True
-                if not changed and not effective_lock_aperture:
-                    f_fallback = next_fstop_value(float(current_fstop), fstop_stops, brighten=False)
-                    if f_fallback is not None and abs(f_fallback - float(current_fstop)) > 1e-6:
-                        print(
-                            "Shutter remained unchanged; applying darker aperture fallback "
-                            f"f/{current_fstop} -> f/{f_fallback}."
-                        )
-                        ok, applied_fstop, msg = apply_fstop_with_backcheck(
-                            previous_fstop=float(current_fstop),
-                            requested_fstop=float(f_fallback),
-                            fstop_stops=fstop_stops,
-                        )
-                        print("Set f-stop fallback:", "ok" if ok else "failed")
-                        if not ok:
-                            print(msg)
-                            return 1
-                        rec.suggested_fstop = float(applied_fstop)
-                        if msg:
-                            print(msg)
-                        changed = True
-            elif rec.action == "brighten":
-                iso_fallback = next_stop_value(float(current_iso), iso_stops, brighten=True)
-                if iso_fallback is not None and iso_fallback <= float(args.iso_max):
-                    fallback_iso = int(round(iso_fallback))
-                    if fallback_iso != int(current_iso):
-                        print(
-                            "Shutter remained unchanged; applying brighter ISO fallback "
-                            f"{current_iso} -> {fallback_iso}."
-                        )
-                        ok, msg = apply_setting("iso", str(fallback_iso))
-                        print("Set ISO fallback:", "ok" if ok else "failed")
-                        if not ok:
-                            print(msg)
-                            return 1
-                        rec.suggested_iso = fallback_iso
-                        changed = True
-                if not changed and not effective_lock_aperture:
-                    f_fallback = next_fstop_value(float(current_fstop), fstop_stops, brighten=True)
-                    if f_fallback is not None and abs(f_fallback - float(current_fstop)) > 1e-6:
-                        print(
-                            "Shutter remained unchanged; applying brighter aperture fallback "
-                            f"f/{current_fstop} -> f/{f_fallback}."
-                        )
-                        ok, applied_fstop, msg = apply_fstop_with_backcheck(
-                            previous_fstop=float(current_fstop),
-                            requested_fstop=float(f_fallback),
-                            fstop_stops=fstop_stops,
-                        )
-                        print("Set f-stop fallback:", "ok" if ok else "failed")
-                        if not ok:
-                            print(msg)
-                            return 1
-                        rec.suggested_fstop = float(applied_fstop)
-                        if msg:
-                            print(msg)
-                        changed = True
+                changed = True
 
         if not effective_lock_aperture and abs(rec.suggested_fstop - current_fstop) > 1e-6:
             print(f"Applying: gphoto2 --set-config f-number={rec.suggested_fstop}")
-            ok, applied_fstop, msg = apply_fstop_with_backcheck(
-                previous_fstop=float(current_fstop),
-                requested_fstop=float(rec.suggested_fstop),
-                fstop_stops=fstop_stops,
-            )
+            ok, msg = apply_setting("f-number", f"{rec.suggested_fstop}")
             print("Set f-stop:", "ok" if ok else "failed")
             if not ok:
-                print(msg)
-                return 1
-            rec.suggested_fstop = float(applied_fstop)
-            if msg:
-                print(msg)
-            changed = True
+                # Lens may not support this f-stop — treat as a hard lens limit
+                # and compensate with shutter speed / ISO rather than aborting.
+                print(
+                    f"f/{rec.suggested_fstop} rejected by camera (likely lens limit). "
+                    "Compensating via shutter / ISO."
+                )
+                bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
+                if rec.action in ("darken", "speed_up_shutter"):
+                    # Darken: ISO first for better quality, shutter second.
+                    comp_iso = next_stop_value(float(current_iso), iso_stops, brighten=False)
+                    if comp_iso is not None and int(round(comp_iso)) >= args.iso_min:
+                        comp_iso_i = int(round(comp_iso))
+                        print(f"Applying: gphoto2 --set-config iso={comp_iso_i}")
+                        ok2, msg2 = apply_setting("iso", str(comp_iso_i))
+                        print("Set ISO (lens-limit compensation):", "ok" if ok2 else "failed")
+                        if ok2:
+                            rec.suggested_iso = comp_iso_i
+                            last_iso = comp_iso_i
+                            changed = True
+                    if not changed:
+                        comp_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=False)
+                        if comp_shutter is not None:
+                            comp_shutter_text = format_shutter(comp_shutter)
+                            print(f"Applying: gphoto2 --set-config shutterspeed={comp_shutter_text}")
+                            ok2, msg2 = apply_setting("shutterspeed", comp_shutter_text)
+                            print("Set shutter (lens-limit compensation):", "ok" if ok2 else "failed")
+                            if ok2:
+                                rec.suggested_shutter_s = comp_shutter
+                                last_shutter_s = comp_shutter
+                                changed = True
+            else:
+                changed = True
 
         if not changed:
             print("No setting changes needed.")
@@ -1365,44 +1152,31 @@ def main() -> int:
                 forced_change = False
                 bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
 
-                if metrics.delta_ev > args.deadband_ev and metrics.highlight_clip_pct < severe_highlight_clip_pct:
+                if metrics.delta_ev > args.deadband_ev:
                     forced_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=True)
                     if forced_shutter is not None:
-                        forced_shutter_text = shutter_to_gphoto_text(forced_shutter)
+                        forced_shutter_text = format_shutter(forced_shutter)
                         print(f"Applying: gphoto2 --set-config shutterspeed={forced_shutter_text}")
-                        ok, applied_shutter_s, msg = apply_shutter_with_backcheck(
-                            previous_shutter_s=float(current_shutter_s),
-                            requested_shutter_s=float(forced_shutter),
-                        )
+                        ok, msg = apply_setting("shutterspeed", forced_shutter_text)
                         print("Set shutter:", "ok" if ok else "failed")
                         if not ok:
                             print(msg)
                             return 1
-                        rec.suggested_shutter_s = float(applied_shutter_s)
-                        if msg:
-                            print(msg)
-                        if format_shutter(rec.suggested_shutter_s) != format_shutter(current_shutter_s):
-                            forced_change = True
-
-                    if not forced_change:
+                        rec.suggested_shutter_s = forced_shutter
+                        forced_change = True
+                    else:
                         if args.startup_priority == "low-iso" and not effective_lock_aperture:
                             current_f = float(current_fstop)
                             lower_f_candidates = sorted([f for f in fstop_stops if f < current_f])
                             if lower_f_candidates:
                                 forced_f = float(lower_f_candidates[-1])
                                 print(f"Applying: gphoto2 --set-config f-number={forced_f}")
-                                ok, applied_fstop, msg = apply_fstop_with_backcheck(
-                                    previous_fstop=float(current_fstop),
-                                    requested_fstop=float(forced_f),
-                                    fstop_stops=fstop_stops,
-                                )
+                                ok, msg = apply_setting("f-number", f"{forced_f}")
                                 print("Set f-stop:", "ok" if ok else "failed")
                                 if not ok:
                                     print(msg)
                                     return 1
-                                rec.suggested_fstop = float(applied_fstop)
-                                if msg:
-                                    print(msg)
+                                rec.suggested_fstop = forced_f
                                 forced_change = True
                         if not forced_change:
                             forced_iso = next_stop_value(float(current_iso), iso_stops, brighten=True)
@@ -1419,23 +1193,16 @@ def main() -> int:
                 else:
                     forced_shutter = next_stop_value(current_shutter_s, bounded_shutter_stops, brighten=False)
                     if forced_shutter is not None:
-                        forced_shutter_text = shutter_to_gphoto_text(forced_shutter)
+                        forced_shutter_text = format_shutter(forced_shutter)
                         print(f"Applying: gphoto2 --set-config shutterspeed={forced_shutter_text}")
-                        ok, applied_shutter_s, msg = apply_shutter_with_backcheck(
-                            previous_shutter_s=float(current_shutter_s),
-                            requested_shutter_s=float(forced_shutter),
-                        )
+                        ok, msg = apply_setting("shutterspeed", forced_shutter_text)
                         print("Set shutter:", "ok" if ok else "failed")
                         if not ok:
                             print(msg)
                             return 1
-                        rec.suggested_shutter_s = float(applied_shutter_s)
-                        if msg:
-                            print(msg)
-                        if format_shutter(rec.suggested_shutter_s) != format_shutter(current_shutter_s):
-                            forced_change = True
-
-                    if not forced_change:
+                        rec.suggested_shutter_s = forced_shutter
+                        forced_change = True
+                    else:
                         forced_iso = next_stop_value(float(current_iso), iso_stops, brighten=False)
                         if forced_iso is not None and forced_iso >= float(args.iso_min):
                             forced_iso_i = int(round(forced_iso))
@@ -1450,17 +1217,6 @@ def main() -> int:
 
                 if forced_change:
                     changed = True
-
-            if not optimal_now and not changed and abs(rec.applied_ev_step) < 1e-6:
-                if startup_tune_pending:
-                    startup_tune_pending = False
-                    print(
-                        "Startup calibration is bounded by camera limits. "
-                        "Switching to normal timed capture cadence."
-                    )
-                    if args.interval_seconds > 0:
-                        next_capture_at = time.time() + args.interval_seconds
-                    continue
 
             if timed_mode and not startup_tune_pending and not optimal_now and not changed and abs(rec.applied_ev_step) < 1e-6:
                 if not copied_this_iteration:
@@ -1482,16 +1238,21 @@ def main() -> int:
         last_iso = rec.suggested_iso
         last_shutter_s = rec.suggested_shutter_s
         last_fstop = rec.suggested_fstop
+        last_recommendation = current_recommendation
 
         # Oscillation detection: if we keep alternating between the same two
         # setting combinations, force an aperture step to break the loop.
-        settings_history.append((last_iso, last_shutter_s, last_fstop))
+        settings_history.append((rec.suggested_iso, rec.suggested_shutter_s, rec.suggested_fstop))
         if len(settings_history) > OSCILLATION_WINDOW:
             settings_history.pop(0)
         if len(settings_history) >= OSCILLATION_WINDOW:
-            s1, s2, s3, s4 = settings_history[-4:]
-            is_abab = (s1 == s3) and (s2 == s4) and (s1 != s2)
-            if is_abab and not effective_lock_aperture:
+            unique_states = set(settings_history)
+            if (
+                startup_tune_pending
+                and args.startup_priority == "star-hunt"
+                and len(unique_states) <= 2
+                and not effective_lock_aperture
+            ):
                 print(
                     "Oscillation detected: stuck between the same settings. "
                     "Forcing one f-stop step to break out."
@@ -1500,21 +1261,83 @@ def main() -> int:
                 # current recommendation (darken → higher f-stop, else lower).
                 if rec.action in ('darken', 'speed_up_shutter'):
                     # Higher f-number = darker (smaller aperture)
-                    f_candidate = next_fstop_value(rec.suggested_fstop, fstop_stops, brighten=False)
+                    f_candidate = next_stop_value(rec.suggested_fstop, fstop_stops, brighten=True)
                 else:
                     # Lower f-number = brighter (wider aperture)
-                    f_candidate = next_fstop_value(rec.suggested_fstop, fstop_stops, brighten=True)
+                    f_candidate = next_stop_value(rec.suggested_fstop, fstop_stops, brighten=False)
                 if f_candidate is not None and f_candidate != rec.suggested_fstop:
                     print(f"Oscillation break: f/{rec.suggested_fstop} -> f/{f_candidate}")
                     ok, msg = apply_setting('f-number', str(f_candidate))
                     if ok:
                         last_fstop = f_candidate
+                        settings_history.clear()
                     else:
-                        print("Oscillation break failed to set f-stop:")
-                        print(msg)
-                    settings_history.clear()
+                        # Camera rejected the f-stop (lens limit); fall back to shutter / ISO.
+                        print(
+                            f"f/{f_candidate} rejected (lens limit). "
+                            "Oscillation break via shutter / ISO."
+                        )
+                        bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
+                        if rec.action in ('darken', 'speed_up_shutter'):
+                            # Darken: ISO first for better quality, shutter second.
+                            fb_iso = next_stop_value(float(rec.suggested_iso), iso_stops, brighten=False)
+                            if fb_iso is not None and int(round(fb_iso)) >= args.iso_min:
+                                fb_iso_i = int(round(fb_iso))
+                                print(f"Oscillation break fallback: ISO -> {fb_iso_i}")
+                                ok2, _ = apply_setting('iso', str(fb_iso_i))
+                                if ok2:
+                                    last_iso = fb_iso_i
+                                    settings_history.clear()
+                            if settings_history:
+                                fb_shutter = next_stop_value(rec.suggested_shutter_s, bounded_shutter_stops, brighten=False)
+                                if fb_shutter is not None:
+                                    fb_text = format_shutter(fb_shutter)
+                                    print(f"Oscillation break fallback: shutter -> {fb_text}")
+                                    ok2, _ = apply_setting('shutterspeed', fb_text)
+                                    if ok2:
+                                        last_shutter_s = fb_shutter
+                                        settings_history.clear()
+                        else:
+                            fb_shutter = next_stop_value(rec.suggested_shutter_s, bounded_shutter_stops, brighten=True)
+                            if fb_shutter is not None:
+                                fb_text = format_shutter(fb_shutter)
+                                print(f"Oscillation break fallback: shutter -> {fb_text}")
+                                ok2, _ = apply_setting('shutterspeed', fb_text)
+                                if ok2:
+                                    last_shutter_s = fb_shutter
+                                    settings_history.clear()
                 else:
-                    print("Oscillation break skipped: no further f-stop available in the requested direction.")
+                    # f-stop already at boundary — apply shutter / ISO to break out directly.
+                    print("Oscillation: aperture at limit. Breaking out via shutter / ISO.")
+                    bounded_shutter_stops = [s for s in shutter_stops if shutter_min_s <= s <= shutter_max_s]
+                    if rec.action in ('darken', 'speed_up_shutter'):
+                        # Darken: ISO first for better quality, shutter second.
+                        fb_iso = next_stop_value(float(rec.suggested_iso), iso_stops, brighten=False)
+                        if fb_iso is not None and int(round(fb_iso)) >= args.iso_min:
+                            fb_iso_i = int(round(fb_iso))
+                            print(f"Oscillation break (aperture limit): ISO -> {fb_iso_i}")
+                            ok2, _ = apply_setting('iso', str(fb_iso_i))
+                            if ok2:
+                                last_iso = fb_iso_i
+                                settings_history.clear()
+                        if settings_history:
+                            fb_shutter = next_stop_value(rec.suggested_shutter_s, bounded_shutter_stops, brighten=False)
+                            if fb_shutter is not None:
+                                fb_text = format_shutter(fb_shutter)
+                                print(f"Oscillation break (aperture limit): shutter -> {fb_text}")
+                                ok2, _ = apply_setting('shutterspeed', fb_text)
+                                if ok2:
+                                    last_shutter_s = fb_shutter
+                                    settings_history.clear()
+                    else:
+                        fb_shutter = next_stop_value(rec.suggested_shutter_s, bounded_shutter_stops, brighten=True)
+                        if fb_shutter is not None:
+                            fb_text = format_shutter(fb_shutter)
+                            print(f"Oscillation break (aperture limit): shutter -> {fb_text}")
+                            ok2, _ = apply_setting('shutterspeed', fb_text)
+                            if ok2:
+                                last_shutter_s = fb_shutter
+                                settings_history.clear()
 
         if startup_tune_pending and args.startup_max_iterations > 0 and startup_attempts >= args.startup_max_iterations:
             startup_tune_pending = False
