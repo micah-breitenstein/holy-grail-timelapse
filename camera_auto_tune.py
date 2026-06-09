@@ -233,6 +233,12 @@ def camera_shutter_label(seconds: float) -> str:
         tolerance = max(1e-6, float(seconds) * 0.02)
         exact_labels = [label for (label, secs) in choices if abs(secs - float(seconds)) <= tolerance]
         if exact_labels:
+            # Prefer camera-native tenth-second labels (for example 5/10)
+            # over mathematically equivalent labels (for example 1/2).
+            # On this body/gphoto2 combo, using the native label reduces
+            # false verification mismatches and improves set-config reliability.
+            # Keep logs/commands aligned with camera-native shutter notation.
+            # Example: display/use 5/10 instead of 1/2 when both map to 0.5s.
             ranked = sorted(
                 exact_labels,
                 key=lambda lbl: (
@@ -742,6 +748,7 @@ def main() -> int:
     pre_capture_busy_failures = 0
     last_capture_fingerprint: Optional[tuple[str, int, int]] = None
     stale_capture_retries = 0
+    last_capture_started_at: Optional[float] = None
 
     next_capture_at = time.time()
     iteration = 0
@@ -761,6 +768,22 @@ def main() -> int:
             wait_s = next_capture_at - now
             print(f"Waiting {wait_s:.1f}s before next capture...")
             time.sleep(wait_s)
+
+        # Hard pacing guard for long exposures: even when probes say "ready",
+        # bodies can still hand back the previous frame if we trigger too soon.
+        if last_shutter_s is not None and last_shutter_s > 1.0 and last_capture_started_at is not None:
+            min_spacing = float(last_shutter_s) + 8.0
+            elapsed = time.time() - last_capture_started_at
+            if elapsed < min_spacing:
+                wait_more = min_spacing - elapsed
+                print(
+                    "Capture pacing guard: "
+                    f"last shutter={camera_shutter_label(last_shutter_s)} needs ~{min_spacing:.0f}s spacing; "
+                    f"waiting {wait_more:.1f}s more."
+                )
+                next_capture_at = time.time() + wait_more
+                first_capture_pending = False
+                continue
 
         # Guard capture start for long exposures using the same USB-claim probe
         # as the hard gate below. This avoids false-busy failures from get-config.
@@ -803,6 +826,7 @@ def main() -> int:
         capture_args = ["--capture-image-and-download"]
         if args.keep_on_camera:
             capture_args.append("--keep")
+        last_capture_started_at = time.time()
         cap = run_gphoto(capture_args, timeout=args.capture_timeout)
         first_capture_pending = False
         cap_output = (cap.stdout + "\n" + cap.stderr).strip()
@@ -879,7 +903,13 @@ def main() -> int:
         use_last_applied_settings = False
         if capture_fingerprint is not None and capture_fingerprint == last_capture_fingerprint:
             stale_capture_retries += 1
-            retry_wait = max(3.0, float(args.capture_retry_seconds))
+            # Repeated same-frame downloads usually mean camera pipeline lag.
+            # Back off by at least one long-exposure cycle before retrying.
+            retry_wait = max(
+                3.0,
+                float(args.capture_retry_seconds),
+                (float(last_shutter_s) + 8.0) if last_shutter_s is not None else 0.0,
+            )
             if stale_capture_retries < 3:
                 print(
                     "Downloaded frame appears unchanged from previous capture; "
