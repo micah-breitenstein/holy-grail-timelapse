@@ -96,6 +96,53 @@ def run_gphoto(args: Sequence[str], timeout: int = 45) -> subprocess.CompletedPr
         return subprocess.CompletedProcess(cmd, returncode=124, stdout=stdout_text, stderr=combined_stderr)
 
 
+def get_config_current_value(name: str, timeout: int = 20) -> Optional[str]:
+    result = run_gphoto(["--get-config", name], timeout=timeout)
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.strip().lower().startswith("current:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def normalize_config_value(name: str, value: str) -> str:
+    text = str(value).strip()
+    if name == "f-number":
+        # Cameras often report current f-stop as "f/6.3" while set-config
+        # expects "6.3". Treat these as the same value so verification does
+        # not trigger false retries/failures after a successful write.
+        text = text.lower().replace("f/", "").replace("f", "")
+    # Some bodies append units/formatting differences in readback values.
+    return text.strip()
+
+
+def config_value_matches(name: str, requested: str, current: str) -> bool:
+    if current is None:
+        return False
+    # Compare normalized semantic values instead of raw strings. This avoids
+    # regressions where camera-native formatting (for example f/6.3 vs 6.3)
+    # causes the verifier to reject valid set-config operations.
+    req = normalize_config_value(name, requested)
+    cur = normalize_config_value(name, current)
+    if name == "iso":
+        try:
+            return int(float(req)) == int(float(cur))
+        except Exception:
+            return req == cur
+    if name == "f-number":
+        try:
+            return abs(float(req) - float(cur)) <= 1e-3
+        except Exception:
+            return req == cur
+    if name == "shutterspeed":
+        try:
+            return abs(parse_shutter(req) - parse_shutter(cur)) <= max(1e-6, parse_shutter(req) * 0.02)
+        except Exception:
+            return req == cur
+    return req == cur
+
+
 def parse_downloaded_filename(output_text: str) -> Optional[Path]:
     # gphoto2 typically emits lines like:
     # "Saving file as capt_MJB09396.JPG"
@@ -159,8 +206,43 @@ def resolve_shutter_choice(value: str) -> str:
     )
     tolerance = max(1e-6, target_seconds * 0.02)
     if abs(best_seconds - target_seconds) <= tolerance:
+        exact_labels = [label for (label, secs) in choices if abs(secs - target_seconds) <= tolerance]
+        if exact_labels:
+            # Prefer camera-native tenth-second labels (e.g. 5/10) when available.
+            ranked = sorted(
+                exact_labels,
+                key=lambda lbl: (
+                    0 if re.fullmatch(r"\d+/10", lbl.strip()) else 1,
+                    0 if "/" in lbl else 1,
+                    len(lbl),
+                ),
+            )
+            return ranked[0]
+    if abs(best_seconds - target_seconds) <= tolerance:
         return best_label
     return value
+
+
+def camera_shutter_label(seconds: float) -> str:
+    default_label = format_shutter(seconds)
+    try:
+        choices = load_shutter_choices()
+    except Exception:
+        choices = []
+    if choices:
+        tolerance = max(1e-6, float(seconds) * 0.02)
+        exact_labels = [label for (label, secs) in choices if abs(secs - float(seconds)) <= tolerance]
+        if exact_labels:
+            ranked = sorted(
+                exact_labels,
+                key=lambda lbl: (
+                    0 if re.fullmatch(r"\d+/10", lbl.strip()) else 1,
+                    0 if "/" in lbl else 1,
+                    len(lbl),
+                ),
+            )
+            return ranked[0]
+    return default_label
 
 
 def apply_setting(name: str, value: str, retries: int = 6, retry_seconds: float = 1.5) -> Tuple[bool, str]:
@@ -171,6 +253,22 @@ def apply_setting(name: str, value: str, retries: int = 6, retry_seconds: float 
     while attempt < max_attempts:
         attempt += 1
 
+        # Hard gate: do not send set-config while USB claim is unavailable.
+        if not wait_for_usb_claim_ready(max_wait_s=20.0, poll_interval_s=1.5):
+            last_message = (
+                f"Could not claim USB interface for set-config {name} after waiting; "
+                "will retry."
+            )
+            if attempt < max_attempts:
+                transient_wait = min(20.0, max(1.0, float(retry_seconds)) * (2 ** (attempt - 1)))
+                print(
+                    f"{name} set deferred: USB claim busy (attempt {attempt}/{max_attempts}); "
+                    f"waiting {transient_wait:.1f}s before retry."
+                )
+                time.sleep(transient_wait)
+                continue
+            break
+
         # Some cameras expose settings as temporarily read-only while they are
         # still flushing buffers or finishing in-camera processing.
         wait_for_camera_ready(max_wait_s=15.0, poll_interval_s=1.0)
@@ -179,7 +277,27 @@ def apply_setting(name: str, value: str, retries: int = 6, retry_seconds: float 
         result = run_gphoto(["--set-config", f"{name}={requested_value}"], timeout=20)
         combined = (result.stdout + "\n" + result.stderr).strip()
         if result.returncode == 0:
-            return True, combined
+            current_value = get_config_current_value(name, timeout=20)
+            if current_value is not None and config_value_matches(name, requested_value, current_value):
+                return True, combined
+
+            # Keep retrying when set-config reports success but immediate
+            # readback disagrees; this catches delayed camera state updates
+            # without assuming the requested value actually stuck.
+            verify_note = (
+                f"set-config returned success but verification mismatch for {name}: "
+                f"requested={requested_value}, current={current_value}"
+            )
+            last_message = "\n".join([combined, verify_note]).strip()
+            if attempt < max_attempts:
+                transient_wait = min(20.0, max(1.0, float(retry_seconds)) * (2 ** (attempt - 1)))
+                print(
+                    f"{name} verification mismatch (attempt {attempt}/{max_attempts}); "
+                    f"waiting {transient_wait:.1f}s before retry."
+                )
+                time.sleep(transient_wait)
+                continue
+            break
 
         last_message = combined
         combined_l = combined.lower()
@@ -305,6 +423,31 @@ def is_read_only_config_error(output_text: str, config_name: Optional[str] = Non
     if config_name is None:
         return True
     return config_name.lower() in text
+
+
+def has_usb_claim_error(output_text: str) -> bool:
+    text = (output_text or "").lower()
+    return (
+        "could not claim the usb device" in text
+        or "device or resource busy" in text
+        or "could not claim interface" in text
+    )
+
+
+def wait_for_usb_claim_ready(max_wait_s: float = 120.0, poll_interval_s: float = 2.0) -> bool:
+    """Poll list-all-config until camera USB interface can be claimed."""
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        probe = run_gphoto(["--list-all-config"], timeout=25)
+        combined = (probe.stdout + "\n" + probe.stderr).strip()
+        if probe.returncode == 0 and not has_usb_claim_error(combined):
+            return True
+        if has_usb_claim_error(combined):
+            time.sleep(poll_interval_s)
+            continue
+        # Treat other transient probe failures as not ready yet.
+        time.sleep(poll_interval_s)
+    return False
 
 
 def next_stop_value(current: float, stops: Sequence[float], brighten: bool) -> Optional[float]:
@@ -619,29 +762,35 @@ def main() -> int:
             print(f"Waiting {wait_s:.1f}s before next capture...")
             time.sleep(wait_s)
 
-        # Guard capture start: if the camera is still flushing long-exposure
-        # buffers or in-camera processing, do not trigger a new frame yet.
+        # Guard capture start for long exposures using the same USB-claim probe
+        # as the hard gate below. This avoids false-busy failures from get-config.
         if last_shutter_s is not None and last_shutter_s > 1.0:
             pre_cap_wait = max(8.0, last_shutter_s + 8.0)
-            if not wait_for_camera_ready(max_wait_s=pre_cap_wait, poll_interval_s=1.0):
+            if not wait_for_usb_claim_ready(max_wait_s=pre_cap_wait, poll_interval_s=1.5):
                 pre_capture_busy_failures += 1
-                if pre_capture_busy_failures >= 3:
-                    print(
-                        "Camera readiness probe failed repeatedly, but this can be a false busy state. "
-                        "Attempting capture anyway."
-                    )
-                    pre_capture_busy_failures = 0
-                else:
-                    retry_wait = max(3.0, float(args.capture_retry_seconds))
-                    print(
-                        f"Camera still busy before capture after {pre_cap_wait:.0f}s; "
-                        f"retrying in {retry_wait:.1f}s."
-                    )
-                    next_capture_at = time.time() + retry_wait
-                    first_capture_pending = False
-                    continue
+                retry_wait = max(3.0, float(args.capture_retry_seconds))
+                print(
+                    f"Camera USB claim not ready before capture (attempt {pre_capture_busy_failures}); "
+                    f"retrying in {retry_wait:.1f}s."
+                )
+                next_capture_at = time.time() + retry_wait
+                first_capture_pending = False
+                continue
             else:
                 pre_capture_busy_failures = 0
+
+        # Additional hard gate requested: do not attempt capture while the USB
+        # interface is still claim-busy according to list-all-config.
+        claim_wait = max(15.0, (last_shutter_s or 0.0) + 15.0)
+        if not wait_for_usb_claim_ready(max_wait_s=claim_wait, poll_interval_s=2.0):
+            retry_wait = max(3.0, float(args.capture_retry_seconds))
+            print(
+                f"Camera USB claim still busy after {claim_wait:.0f}s (list-all-config); "
+                f"retrying in {retry_wait:.1f}s."
+            )
+            next_capture_at = time.time() + retry_wait
+            first_capture_pending = False
+            continue
 
         iteration += 1
         if timed_mode:
@@ -730,20 +879,20 @@ def main() -> int:
         use_last_applied_settings = False
         if capture_fingerprint is not None and capture_fingerprint == last_capture_fingerprint:
             stale_capture_retries += 1
+            retry_wait = max(3.0, float(args.capture_retry_seconds))
             if stale_capture_retries < 3:
-                retry_wait = max(3.0, float(args.capture_retry_seconds))
                 print(
                     "Downloaded frame appears unchanged from previous capture; "
                     f"retrying capture in {retry_wait:.1f}s."
                 )
-                next_capture_at = time.time() + retry_wait
-                continue
-            print(
-                "Downloaded frame is still unchanged after repeated retries; "
-                "proceeding with analysis and using last applied camera settings."
-            )
-            stale_capture_retries = 0
-            use_last_applied_settings = True
+            else:
+                print(
+                    "Downloaded frame is still unchanged after repeated retries; "
+                    "skipping analysis/settings changes for this cycle and retrying capture."
+                )
+                stale_capture_retries = 0
+            next_capture_at = time.time() + retry_wait
+            continue
         else:
             stale_capture_retries = 0
 
@@ -757,7 +906,8 @@ def main() -> int:
             ready = wait_for_camera_ready(max_wait_s=nr_max, poll_interval_s=1.5)
             if not ready:
                 print(
-                    f"Camera still reports busy after {nr_max:.0f}s; proceeding with analysis/tuning anyway."
+                    f"Camera still reports busy after {nr_max:.0f}s; "
+                    "continuing with captured-frame analysis and verifying setting writes on apply."
                 )
 
         suppress_keeper_this_frame = startup_tune_pending and timed_mode
@@ -792,7 +942,7 @@ def main() -> int:
 
         print(
             "Current settings: "
-            f"ISO={current_iso}, shutter={format_shutter(current_shutter_s)}, f/{current_fstop}"
+            f"ISO={current_iso}, shutter={camera_shutter_label(current_shutter_s)}, f/{current_fstop}"
         )
         print(
             "Metrics: "
@@ -1007,10 +1157,27 @@ def main() -> int:
             "Recommend: "
             f"action={rec.action}, "
             f"ISO={rec.suggested_iso}, "
-            f"shutter={format_shutter(rec.suggested_shutter_s)}, "
+            f"shutter={camera_shutter_label(rec.suggested_shutter_s)}, "
             f"f/{rec.suggested_fstop}, "
             f"ev_step={rec.applied_ev_step:.3f}"
         )
+
+        # Always show a concise delta so remote logs clearly indicate what is changing.
+        planned_changes = []
+        if int(rec.suggested_iso) != int(current_iso):
+            planned_changes.append(f"ISO {current_iso} -> {rec.suggested_iso}")
+        shutter_delta_preview = abs(float(rec.suggested_shutter_s) - float(current_shutter_s))
+        shutter_tol_preview = max(1e-6, float(current_shutter_s) * 0.01)
+        if shutter_delta_preview > shutter_tol_preview:
+            planned_changes.append(
+                f"shutter {camera_shutter_label(current_shutter_s)} -> {camera_shutter_label(rec.suggested_shutter_s)}"
+            )
+        if abs(float(rec.suggested_fstop) - float(current_fstop)) > 1e-6:
+            planned_changes.append(f"f/{current_fstop} -> f/{rec.suggested_fstop}")
+        if planned_changes:
+            print("Planned changes: " + "; ".join(planned_changes))
+        else:
+            print("Planned changes: none")
 
         current_recommendation = (
             int(rec.suggested_iso),
@@ -1086,6 +1253,7 @@ def main() -> int:
                         print(f"Startup nudge: forcing darker ISO stop {rec.suggested_iso}")
 
         changed = False
+        applied_changes = []
         if rec.suggested_iso != current_iso:
             print(f"Applying: gphoto2 --set-config iso={rec.suggested_iso}")
             ok, msg = apply_setting("iso", str(rec.suggested_iso))
@@ -1094,10 +1262,16 @@ def main() -> int:
                 print(msg)
                 return 1
             changed = True
+            applied_changes.append(f"ISO {current_iso} -> {rec.suggested_iso}")
 
-        shutter_text = format_shutter(rec.suggested_shutter_s)
-        current_shutter_text = format_shutter(current_shutter_s)
-        if shutter_text != current_shutter_text:
+        shutter_text = camera_shutter_label(rec.suggested_shutter_s)
+        current_shutter_text = camera_shutter_label(current_shutter_s)
+        # Compare numeric shutter values, not rounded display strings.
+        # Example: 0.4s and 0.5s can both render as "1/2" when rounded,
+        # which would incorrectly skip a real exposure change.
+        shutter_delta = abs(float(rec.suggested_shutter_s) - float(current_shutter_s))
+        shutter_tol = max(1e-6, float(current_shutter_s) * 0.01)
+        if shutter_delta > shutter_tol:
             print(f"Applying: gphoto2 --set-config shutterspeed={shutter_text}")
             ok, msg = apply_setting("shutterspeed", shutter_text)
             print("Set shutter:", "ok" if ok else "failed")
@@ -1106,6 +1280,7 @@ def main() -> int:
                 return 1
             else:
                 changed = True
+                applied_changes.append(f"shutter {current_shutter_text} -> {shutter_text}")
 
         if not effective_lock_aperture and abs(rec.suggested_fstop - current_fstop) > 1e-6:
             print(f"Applying: gphoto2 --set-config f-number={rec.suggested_fstop}")
@@ -1144,6 +1319,12 @@ def main() -> int:
                                 changed = True
             else:
                 changed = True
+                applied_changes.append(f"f/{current_fstop} -> f/{rec.suggested_fstop}")
+
+        if applied_changes:
+            print("Applied changes: " + "; ".join(applied_changes))
+        else:
+            print("Applied changes: none")
 
         if not changed:
             print("No setting changes needed.")
