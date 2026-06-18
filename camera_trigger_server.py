@@ -670,6 +670,8 @@ def _count_image_files(path_obj):
                         except Exception:
                                 continue
                         lower_name = child.name.lower()
+                        if not lower_name.endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                                continue
                         if lower_name.startswith('timelapse_') or lower_name.startswith('capt_'):
                                 count += 1
                 return count
@@ -717,6 +719,8 @@ def _preview_frame_urls(path_obj, limit=80):
                         if not child.is_file():
                                 continue
                         lower_name = child.name.lower()
+                        if not lower_name.endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp')):
+                                continue
                         if not (lower_name.startswith('timelapse_') or lower_name.startswith('capt_')):
                                 continue
                         images.append(child)
@@ -725,9 +729,15 @@ def _preview_frame_urls(path_obj, limit=80):
                         return []
 
                 # Keep natural timelapse order while limiting payload size.
+                # Always include the first frame so UI fallback thumbnails can start at frame 1.
                 images = sorted(images, key=lambda p: p.name)
                 if len(images) > limit:
-                        images = images[-limit:]
+                        if limit <= 1:
+                                images = images[:1]
+                        else:
+                                first_frame = images[0]
+                                recent_frames = images[-(limit - 1):]
+                                images = [first_frame] + recent_frames
 
                 out = []
                 for img in images:
@@ -2381,7 +2391,7 @@ def _remote_counts_by_subdir(subdir_name):
                 "[ -d \"$d\" ] || continue; "
                 f"target=\"$d\"/{subdir_q}; "
                 "[ -d \"$target\" ] || continue; "
-                "c=$(find \"$target\" -maxdepth 1 -type f -size +0c | wc -l); "
+                "c=$(find \"$target\" -maxdepth 1 -type f -size +0c \\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \\) | wc -l); "
                 "printf '%s\t%s\n' \"$(basename \"$d\")\" \"$c\"; "
                 "done | LC_ALL=C sort"
         )
@@ -2483,7 +2493,7 @@ def _remote_latest_mtime_by_subdir(subdir_name):
                 return dict(REMOTE_LATEST_MTIME_CACHE.get(subdir_key, {}))
 
 
-def _remote_first_image_info(folder_name, preferred_subdir='optimal'):
+def _remote_edge_image_info(folder_name, preferred_subdir='optimal', edge='first'):
         folder = str(folder_name or '').strip()
         if not _timelapse_name_is_valid(folder):
                 return {'path': None, 'name': None, 'url': None}
@@ -2496,18 +2506,32 @@ def _remote_first_image_info(folder_name, preferred_subdir='optimal'):
                 if candidate not in subdirs:
                         subdirs.append(candidate)
 
+        edge_mode = str(edge or 'first').strip().lower()
+        if edge_mode not in ('first', 'latest'):
+                edge_mode = 'first'
+
         for subdir in subdirs:
                 remote_dir = f"{TIMELAPSE_ROOT}/{folder}/{subdir}"
                 remote_dir_q = shlex.quote(remote_dir)
-                # Prefer the latest browser-displayable image (avoids early white calibration frames).
-                cmd = (
-                        f"if [ -d {remote_dir_q} ]; then "
-                        f"find {remote_dir_q} -maxdepth 1 -type f -size +0c \\( "
-                        "-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' "
-                        "-o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \\) "
-                        "-printf '%T@ %p\\n' | sort -n | tail -n 1 | cut -d' ' -f2-; "
-                        "fi"
-                )
+                # Choose either the first-by-name or latest-by-mtime browser-displayable image.
+                if edge_mode == 'first':
+                        cmd = (
+                                f"if [ -d {remote_dir_q} ]; then "
+                                f"find {remote_dir_q} -maxdepth 1 -type f -size +0c \\( "
+                                "-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' "
+                                "-o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \\) "
+                                "-printf '%f\\t%p\\n' | LC_ALL=C sort | head -n 1 | cut -f2-; "
+                                "fi"
+                        )
+                else:
+                        cmd = (
+                                f"if [ -d {remote_dir_q} ]; then "
+                                f"find {remote_dir_q} -maxdepth 1 -type f -size +0c \\( "
+                                "-iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' "
+                                "-o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \\) "
+                                "-printf '%T@ %p\\n' | sort -n | tail -n 1 | cut -d' ' -f2-; "
+                                "fi"
+                        )
                 probe = subprocess.run(
                         [
                                 'ssh',
@@ -2526,31 +2550,6 @@ def _remote_first_image_info(folder_name, preferred_subdir='optimal'):
                         continue
                 path = str((probe.stdout or '').strip().splitlines()[-1] if (probe.stdout or '').strip() else '')
                 if not path:
-                        # Fallback: latest timelapse/capt file. May still be non-renderable (e.g., RAW).
-                        fallback_cmd = (
-                                f"if [ -d {remote_dir_q} ]; then "
-                                f"find {remote_dir_q} -maxdepth 1 -type f -size +0c \\( "
-                                "-name 'timelapse_*' -o -name 'capt_*' \\) "
-                                "-printf '%T@ %p\\n' | sort -n | tail -n 1 | cut -d' ' -f2-; "
-                                "fi"
-                        )
-                        fallback_probe = subprocess.run(
-                                [
-                                        'ssh',
-                                        '-o', 'BatchMode=yes',
-                                        '-o', 'ConnectTimeout=12',
-                                        '-o', 'IdentitiesOnly=yes',
-                                        '-i', ORIN_SSH_KEY,
-                                        f'{ORIN_SSH_USER}@{ORIN_SSH_HOST}',
-                                        fallback_cmd,
-                                ],
-                                capture_output=True,
-                                text=True,
-                                check=False,
-                        )
-                        if fallback_probe.returncode == 0:
-                                path = str((fallback_probe.stdout or '').strip().splitlines()[-1] if (fallback_probe.stdout or '').strip() else '')
-                if not path:
                         continue
                 return {
                         'path': path,
@@ -2559,6 +2558,14 @@ def _remote_first_image_info(folder_name, preferred_subdir='optimal'):
                 }
 
         return {'path': None, 'name': None, 'url': None}
+
+
+def _remote_first_image_info(folder_name, preferred_subdir='optimal'):
+        return _remote_edge_image_info(folder_name, preferred_subdir=preferred_subdir, edge='first')
+
+
+def _remote_latest_image_info(folder_name, preferred_subdir='optimal'):
+        return _remote_edge_image_info(folder_name, preferred_subdir=preferred_subdir, edge='latest')
 
 
 def _remote_preview_frame_urls(folder_name, preferred_subdir='optimal', limit=80):
@@ -2582,7 +2589,7 @@ def _remote_preview_frame_urls(folder_name, preferred_subdir='optimal', limit=80
                 cmd = (
                         f"if [ -d {remote_q} ]; then "
                         f"find {remote_q} -maxdepth 1 -type f -size +0c "
-                        "\\( -name 'timelapse_*' -o -name 'capt_*' \\) "
+                        "\\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.bmp' \\) "
                         "-printf '%f\\n' | LC_ALL=C sort; "
                         "fi"
                 )
@@ -2607,7 +2614,12 @@ def _remote_preview_frame_urls(folder_name, preferred_subdir='optimal', limit=80
                 if not names:
                         continue
                 if len(names) > try_limit:
-                        names = names[-try_limit:]
+                        if try_limit <= 1:
+                                names = names[:1]
+                        else:
+                                first_frame = names[0]
+                                recent_frames = names[-(try_limit - 1):]
+                                names = [first_frame] + recent_frames
 
                 out = []
                 for name in names:
@@ -2917,16 +2929,20 @@ def list_timelapse_directories(view='optimal', profile=False):
                 local_latest = _latest_local_image_info(local_selected_dir)
                 preview_frames = _preview_frame_urls(local_selected_dir)
                 const_remote_ahead = remote_selected_count > local_selected_count
-                if const_remote_ahead or not preview_frames:
+                # Prefer local mirrored previews for responsiveness.
+                # Remote preview lookup is only used when local has no preview frames yet.
+                if not preview_frames:
                         preview_frames = _remote_preview_frame_urls(name, preferred_subdir=view_mode, limit=80)
                 ai_meta = ai_summary_by_dir.get(name, {})
                 preview_url = None
                 preview_name = None
                 remote_first = {'path': None, 'name': None, 'url': None}
-                if const_remote_ahead or not local_latest.get('path'):
+                remote_latest = {'path': None, 'name': None, 'url': None}
+                if not local_latest.get('path'):
                         remote_first = _remote_first_image_info(name, preferred_subdir=view_mode)
+                        remote_latest = _remote_latest_image_info(name, preferred_subdir=view_mode)
 
-                if local_latest.get('path') and not const_remote_ahead:
+                if local_latest.get('path'):
                         preview_url = f"/api/timelapse-preview?path={quote(local_latest['path'])}&ts={int(local_latest.get('mtime') or 0)}"
                         preview_name = local_latest.get('name')
                 else:
@@ -2943,8 +2959,8 @@ def list_timelapse_directories(view='optimal', profile=False):
                                                 # Keep remote preview URL when local mirror write races or path is transient.
                                                 pass
 
-                last_photo_name = preview_name if const_remote_ahead else (local_latest.get('name') or preview_name)
-                last_photo_mtime = remote_latest_mtime if const_remote_ahead else local_latest.get('mtime')
+                last_photo_name = local_latest.get('name') or remote_latest.get('name') or preview_name
+                last_photo_mtime = local_latest.get('mtime') or remote_latest_mtime
 
                 if (not ai_meta or not ai_meta.get('scores')) and preview_name:
                         computed_ai = _compute_preview_ai_summary(name, preview_name, preferred_subdir=view_mode)
@@ -3136,7 +3152,7 @@ def build_latest_photo_payload(folder_name):
         }
 
 
-def start_timelapse_sync(folder_name, view='optimal', watch=False, interval_seconds=60):
+def start_timelapse_sync(folder_name, view='optimal', watch=False, interval_seconds=60, include_raw=False):
         global SYNC_PROCESS, SYNC_FOLDER, SYNC_VIEW, SYNC_STARTED_AT, SYNC_WATCH, SYNC_INTERVAL_SECONDS
 
         folder = str(folder_name or '').strip()
@@ -3182,6 +3198,8 @@ def start_timelapse_sync(folder_name, view='optimal', watch=False, interval_seco
                                 '--ssh-key',
                                 ORIN_SSH_KEY,
                         ]
+                        if include_raw:
+                                command.append('--include-raw')
                         if watch_mode:
                                 command.extend(['--watch', '--interval', str(interval_val)])
                         proc = subprocess.Popen(
@@ -4263,6 +4281,13 @@ TIMELAPSE_PAGE = """<!doctype html>
                 .preview-video {
                         cursor: pointer;
                 }
+                .preview-video::-webkit-media-controls-start-playback-button {
+                        display: none !important;
+                        -webkit-appearance: none;
+                }
+                .preview-video::-webkit-media-controls-enclosure {
+                        display: none !important;
+                }
                 .preview-playbar {
                         width: 180px;
                         height: 4px;
@@ -4850,6 +4875,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 <button id=\"refreshBtn\" type=\"button\">Refresh</button>
                                 <label style=\"color:#aaa;display:flex;align-items:center;gap:6px;margin-left:8px;\"><input id=\"keepUpToDateChk\" type=\"checkbox\"> Keep up to date</label>
                                 <label style=\"color:#aaa;display:flex;align-items:center;gap:6px;\">Every <input id=\"keepUpToDateInterval\" type=\"number\" min=\"5\" max=\"3600\" value=\"30\" style=\"width:74px;\"> s</label>
+                                <label style=\"color:#aaa;display:flex;align-items:center;gap:6px;margin-left:8px;\" title=\"Also sync RAW files (.ARW, .CR2, etc). Off by default.\"><input id=\"syncRawChk\" type=\"checkbox\"> Sync RAW</label>
                                 <label style="color:#aaa;display:flex;align-items:center;gap:6px;">Monitor view
                                         <select id="monitorViewSelect" style="background:#111;border:1px solid #333;color:#fff;border-radius:6px;padding:6px 8px;">
                                                 <option value="auto" selected>Auto</option>
@@ -4928,6 +4954,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                 const navViewer = document.getElementById('navViewer');
                 const keepUpToDateChk = document.getElementById('keepUpToDateChk');
                 const keepUpToDateInterval = document.getElementById('keepUpToDateInterval');
+                const syncRawChk = document.getElementById('syncRawChk');
                 const monitorViewSelect = document.getElementById('monitorViewSelect');
                 const viewHint = document.getElementById('viewHint');
                 const stopSyncBtn = document.getElementById('stopSyncBtn');
@@ -5233,7 +5260,8 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 }
                         }
 
-                        rows.innerHTML = ordered.map(item => {
+                        rows.innerHTML = ordered.map((item, rowIndex) => {
+                                const isPriorityRow = rowIndex === 0;
                                 const isRemote = item.source === 'remote';
                                 const syncRunningThis = !!sync.running && sync.folder === item.name;
                                 const localOptimalCount = Number(item.local_optimal_count ?? 0);
@@ -5270,11 +5298,18 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 const lastPhotoText = item.last_photo_name || item.preview_name || 'n/a';
                                 const shouldLiveRefreshThumb = !!(sync.watch && syncRunningThis);
                                 const previewSrc = shouldLiveRefreshThumb ? withCacheBust(item.preview_url, Date.now()) : item.preview_url;
+                                const firstFrameUrlRaw = (Array.isArray(item.preview_frames) && item.preview_frames.length)
+                                        ? String(item.preview_frames[0] || '').trim()
+                                        : '';
+                                const firstFrameSrc = firstFrameUrlRaw
+                                        ? (shouldLiveRefreshThumb ? withCacheBust(firstFrameUrlRaw, Date.now()) : firstFrameUrlRaw)
+                                        : '';
                                 const hasExport = !!item.latest_export_available;
                                 const exportVideoSrc = String(item.latest_export_url || '').trim();
-                                const showVideoThumb = !syncRunningThis && !item.is_live && hasExport && !!exportVideoSrc;
-                                const showExportNeeded = !syncRunningThis && !item.is_live && !hasExport;
-                                const showReexport = !syncRunningThis && !item.is_live && hasExport;
+                                const hasPosterForVideo = !!(firstFrameSrc || previewSrc);
+                                const showVideoThumb = hasExport && !!exportVideoSrc && hasPosterForVideo;
+                                const showExportNeeded = !hasExport;
+                                const showReexport = hasExport;
                                 const exportNeededHtml = showExportNeeded
                                         ? `<div class="preview-actions"><button class="export-needed-btn" type="button" data-export-needed="${item.name}" data-view="${syncView}">Export Needed</button></div>`
                                         : '';
@@ -5283,10 +5318,19 @@ TIMELAPSE_PAGE = """<!doctype html>
                                         : '';
                                 let previewHtml = '<div class="preview-empty">No preview</div>' + exportNeededHtml;
                                 if (showVideoThumb) {
-                                        const videoPoster = item.preview_url ? ` poster="${previewSrc}"` : '';
-                                        previewHtml = `<video class="preview preview-video" src="${exportVideoSrc}"${videoPoster} muted playsinline preload="metadata" data-hover-play-video="1" data-loop-id="${item.name}" data-loop-view="${syncView}" data-open-preview-dir="${item.name}" data-open-preview-view="${syncView}"></video>${reexportHtml}`;
-                                } else if (item.preview_url) {
-                                        previewHtml = `<img class="preview" src="${previewSrc}" alt="${item.name} preview" data-open-preview-dir="${item.name}" data-open-preview-view="${syncView}">${exportNeededHtml}${reexportHtml}`;
+                                        const videoPosterSrc = firstFrameSrc || previewSrc;
+                                        const videoPoster = videoPosterSrc ? ` poster="${videoPosterSrc}"` : '';
+                                        const videoPreload = isPriorityRow ? 'auto' : 'metadata';
+                                        const fallbackPrimary = firstFrameSrc || '';
+                                        const fallbackAlt = previewSrc || '';
+                                        const fallbackAttr = fallbackPrimary ? ` data-fallback-src="${fallbackPrimary}"` : '';
+                                        const fallbackAltAttr = fallbackAlt ? ` data-fallback-src-alt="${fallbackAlt}"` : '';
+                                        previewHtml = `<video class="preview preview-video" src="${exportVideoSrc}"${videoPoster}${fallbackAttr}${fallbackAltAttr} muted playsinline webkit-playsinline disablePictureInPicture controlsList="nodownload noplaybackrate noremoteplayback nofullscreen" preload="${videoPreload}" data-hover-play-video="1" data-loop-id="${item.name}" data-loop-view="${syncView}" data-open-preview-dir="${item.name}" data-open-preview-view="${syncView}"></video>${reexportHtml}`;
+                                } else if (item.preview_url || firstFrameSrc) {
+                                        const staticPreviewSrc = firstFrameSrc || previewSrc;
+                                        const loadingMode = isPriorityRow ? 'eager' : 'lazy';
+                                        const fetchPriority = isPriorityRow ? 'high' : 'low';
+                                        previewHtml = `<img class="preview" src="${staticPreviewSrc}" alt="${item.name} preview" loading="${loadingMode}" fetchpriority="${fetchPriority}" decoding="async" data-open-preview-dir="${item.name}" data-open-preview-view="${syncView}">${exportNeededHtml}${reexportHtml}`;
                                 }
                                 const score = item.ai_scores || {};
                                 const frameMetaMini = renderFrameMetaMini(item.frame_meta || null, {
@@ -5341,6 +5385,18 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 `;
                         }).join('');
 
+                        // Hint the browser to fetch the first visible preview poster quickly.
+                        const firstPreviewMedia = rows.querySelector('td.preview-cell video.preview, td.preview-cell img.preview');
+                        if (firstPreviewMedia && firstPreviewMedia.tagName === 'VIDEO') {
+                                const posterSrc = String(firstPreviewMedia.getAttribute('poster') || '').trim();
+                                if (posterSrc) {
+                                        const posterPrefetch = new Image();
+                                        posterPrefetch.decoding = 'async';
+                                        try { posterPrefetch.fetchPriority = 'high'; } catch (_) {}
+                                        posterPrefetch.src = posterSrc;
+                                }
+                        }
+
                         document.querySelectorAll('.sync-action-btn').forEach(btn => {
                                 btn.addEventListener('click', async () => {
                                         const folder = btn.getAttribute('data-folder');
@@ -5353,11 +5409,12 @@ TIMELAPSE_PAGE = """<!doctype html>
                                         if (source === 'local') return;
                                         btn.disabled = true;
                                         const keepUp = !!keepUpToDateChk.checked;
+                                        const includeRaw = !!(syncRawChk && syncRawChk.checked);
                                         let intervalSeconds = parseInt(String(keepUpToDateInterval.value || '30'), 10);
                                         if (!Number.isFinite(intervalSeconds)) intervalSeconds = 30;
                                         intervalSeconds = Math.max(5, Math.min(3600, intervalSeconds));
                                         keepUpToDateInterval.value = String(intervalSeconds);
-                                        setStatus('Starting ' + (keepUp ? 'live ' : '') + 'sync (' + syncView + ') for ' + folder + '...', '');
+                                        setStatus('Starting ' + (keepUp ? 'live ' : '') + 'sync (' + syncView + (includeRaw ? ' +RAW' : '') + ') for ' + folder + '...', '');
                                         try {
                                                 const r = await fetch('/api/timelapse-sync', {
                                                         method: 'POST',
@@ -5367,6 +5424,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                                                                 view: syncView,
                                                                 keep_up_to_date: keepUp,
                                                                 interval_seconds: intervalSeconds,
+                                                                include_raw: includeRaw,
                                                         })
                                                 });
                                                 const body = await r.json();
@@ -5579,6 +5637,10 @@ TIMELAPSE_PAGE = """<!doctype html>
                 }
 
                 function bindPreviewOpeners() {
+                        const isLikelyTouch = (() => {
+                                const ua = navigator.userAgent || '';
+                                return /iPhone|iPad|iPod/i.test(ua) || (window.matchMedia && window.matchMedia('(hover: none)').matches);
+                        })();
                         const media = document.querySelectorAll('[data-open-preview-dir]');
                         media.forEach(el => {
                                 if (el.dataset.openPreviewBound === '1') return;
@@ -5589,6 +5651,20 @@ TIMELAPSE_PAGE = """<!doctype html>
                                         const dir = String(el.getAttribute('data-open-preview-dir') || '').trim();
                                         const view = String(el.getAttribute('data-open-preview-view') || 'optimal').trim().toLowerCase() === 'all' ? 'all' : 'optimal';
                                         if (!dir) return;
+                                        if (isLikelyTouch && el.tagName === 'VIDEO') {
+                                                const vid = el;
+                                                if (vid.paused || vid.readyState < 2) {
+                                                        event.preventDefault();
+                                                        event.stopPropagation();
+                                                        try {
+                                                                vid.muted = true;
+                                                                vid.defaultMuted = true;
+                                                                const p = vid.play();
+                                                                if (p && typeof p.catch === 'function') p.catch(() => {});
+                                                        } catch (_) {}
+                                                        return;
+                                                }
+                                        }
                                         const url = '/timelapse-preview?dir=' + encodeURIComponent(dir) + '&view=' + encodeURIComponent(view);
                                         if (event.metaKey || event.ctrlKey || event.button === 1) {
                                                 window.open(url, '_blank', 'noopener');
@@ -5633,10 +5709,47 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 if (video.dataset.hoverBound === '1') {
                                         return;
                                 }
+                                const swapToFallbackImage = () => {
+                                        if (video.dataset.fallbackApplied === '1') return;
+                                        const fallbackPrimary = String(video.getAttribute('data-fallback-src') || '').trim();
+                                        const fallbackAlt = String(video.getAttribute('data-fallback-src-alt') || '').trim();
+                                        const fallbackCandidates = [fallbackPrimary, fallbackAlt].filter((v, idx, arr) => v && arr.indexOf(v) === idx);
+                                        if (!fallbackCandidates.length) return;
+                                        const dir = String(video.getAttribute('data-open-preview-dir') || '').trim();
+                                        const view = String(video.getAttribute('data-open-preview-view') || 'optimal').trim();
+                                        if (!dir) return;
+                                        const parent = video.parentNode;
+                                        if (!parent) return;
+                                        const tryIndex = (idx) => {
+                                                if (idx >= fallbackCandidates.length) {
+                                                        return;
+                                                }
+                                                const img = document.createElement('img');
+                                                img.className = 'preview';
+                                                img.alt = dir + ' preview';
+                                                img.setAttribute('data-open-preview-dir', dir);
+                                                img.setAttribute('data-open-preview-view', view);
+                                                img.addEventListener('error', () => {
+                                                        tryIndex(idx + 1);
+                                                }, { once: true });
+                                                img.addEventListener('load', () => {
+                                                        video.dataset.fallbackApplied = '1';
+                                                        if (!video.parentNode) return;
+                                                        video.parentNode.replaceChild(img, video);
+                                                        bindPreviewOpeners();
+                                                }, { once: true });
+                                                img.src = fallbackCandidates[idx];
+                                        };
+                                        tryIndex(0);
+                                };
                                 video.dataset.hoverBound = '1';
                                 video.muted = true;
                                 video.defaultMuted = true;
                                 video.playsInline = true;
+                                video.setAttribute('muted', 'muted');
+                                video.setAttribute('playsinline', 'playsinline');
+                                video.setAttribute('webkit-playsinline', 'true');
+                                video.preload = 'metadata';
                                 video.loop = false;
                                 const loopId = String(video.getAttribute('data-loop-id') || '').trim();
                                 const loopView = String(video.getAttribute('data-loop-view') || 'optimal').trim().toLowerCase() === 'all' ? 'all' : 'optimal';
@@ -5676,7 +5789,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 const setActiveMode = (mode) => {
                                         activeMarker = (mode === 'out') ? 'out' : 'in';
                                         Array.from(modeButtons || []).forEach(btn => {
-                                                const btnMode = String(btn.getAttribute('data-loop-mode') || 'in').toLowerCase();
+                                                const btnMode = String(btn.getAttribute('data-loop-mode') || 'in').toLowerCase() === 'out' ? 'out' : 'in';
                                                 btn.classList.toggle('is-active', btnMode === activeMarker);
                                         });
                                 };
@@ -6052,9 +6165,12 @@ TIMELAPSE_PAGE = """<!doctype html>
                                                 playPromise.catch(() => {
                                                         try {
                                                                 video.muted = true;
+                                                                video.defaultMuted = true;
                                                                 const retry = video.play();
                                                                 if (retry && typeof retry.catch === 'function') {
-                                                                        retry.catch(() => {});
+                                                                        retry.catch(() => {
+                                                                                swapToFallbackImage();
+                                                                        });
                                                                 }
                                                         } catch (_) {}
                                                 });
@@ -6099,23 +6215,19 @@ TIMELAPSE_PAGE = """<!doctype html>
                                         setPlaybarProgress(loopRange);
                                 };
 
-                                const autoplayPreview = () => {
-                                        if (document.hidden) return;
-                                        playPreview();
-                                };
-                                const onVisibility = () => {
+                                const hoverCapable = !!(window.matchMedia && window.matchMedia('(hover: hover)').matches);
+                                if (hoverCapable) {
+                                        video.addEventListener('mouseenter', () => {
+                                                playPreview();
+                                        });
+                                        video.addEventListener('mouseleave', () => {
+                                                stopPreview();
+                                        });
+                                }
+                                document.addEventListener('visibilitychange', () => {
                                         if (document.hidden) {
                                                 stopPreview();
-                                        } else {
-                                                autoplayPreview();
                                         }
-                                };
-                                video.autoplay = true;
-                                video.setAttribute('autoplay', 'autoplay');
-                                video.addEventListener('loadeddata', autoplayPreview);
-                                document.addEventListener('visibilitychange', onVisibility);
-                                window.requestAnimationFrame(() => {
-                                        autoplayPreview();
                                 });
                                 video.addEventListener('timeupdate', onTimeUpdate);
                                 video.addEventListener('ended', loopBack);
@@ -6131,6 +6243,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 });
                                 video.addEventListener('durationchange', syncTimelineFromInputs);
                                 video.addEventListener('loadedmetadata', () => setPlaybarProgress(getLoopRange()));
+                                video.addEventListener('error', swapToFallbackImage);
                                 syncTimelineFromInputs();
                                 if (playbarFill) {
                                         playbarFill.style.width = '0%';
@@ -6524,7 +6637,14 @@ TIMELAPSE_PAGE = """<!doctype html>
                                 const signature = buildDirectoriesSignature(dirs, syncState);
                                 const forceLiveRender = !!(syncState.running && syncState.watch);
                                 const hoverVideoActive = !!document.querySelector('video.preview-video:hover');
-                                if (forceRender || (!hoverVideoActive && (forceLiveRender || signature !== lastDirectoriesSignature))) {
+                                const playingPreviewActive = Array.from(document.querySelectorAll('video.preview-video')).some((v) => {
+                                        try {
+                                                return !v.paused && !v.ended;
+                                        } catch (_) {
+                                                return false;
+                                        }
+                                });
+                                if (forceRender || (!hoverVideoActive && !playingPreviewActive && (forceLiveRender || signature !== lastDirectoriesSignature))) {
                                         renderRows(dirs, syncState);
                                         lastDirectoriesSignature = signature;
                                 }
@@ -6659,7 +6779,7 @@ TIMELAPSE_PAGE = """<!doctype html>
                 initMainNavLinks();
                 loadHiddenFolders();
                 refresh(false, true);
-                setInterval(() => refresh(true, false), 3000);
+                setInterval(() => refresh(true, false), 8000);
         </script>
 </body>
 </html>
@@ -7046,11 +7166,13 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                         is_media = self.path.startswith('/api/timelapse-export-media')
                         self.send_response(HTTPStatus.OK)
                         self.send_header('Content-Type', content_type)
-                        self.send_header('Cache-Control', 'no-store')
                         if is_media:
+                                # Generated export media names are content-specific, so immutable caching is safe.
+                                self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
                                 self.send_header('Accept-Ranges', 'bytes')
                                 self.send_header('Content-Disposition', f'inline; filename="{file_name}"')
                         else:
+                                self.send_header('Cache-Control', 'no-store')
                                 self.send_header('Content-Disposition', f'attachment; filename="{file_name}"')
                         self._send_cors_headers()
                         self.send_header('Content-Length', str(file_size))
@@ -7072,10 +7194,13 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                         self._write_body_safe(body)
                         return
 
-                if self.path == '/timelapse-directories':
+                if self.path.startswith('/timelapse-directories'):
                         body = TIMELAPSE_PAGE.encode('utf-8')
                         self.send_response(HTTPStatus.OK)
                         self.send_header('Content-Type', 'text/html; charset=utf-8')
+                        self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                        self.send_header('Pragma', 'no-cache')
+                        self.send_header('Expires', '0')
                         self._send_cors_headers()
                         self.send_header('Content-Length', str(len(body)))
                         self.end_headers()
@@ -7271,7 +7396,8 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                         content_length = max(0, end - start + 1)
                         self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
                         self.send_header('Content-Type', content_type)
-                        self.send_header('Cache-Control', 'no-store')
+                        # Generated export media names are content-specific, so immutable caching is safe.
+                        self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
                         self.send_header('Accept-Ranges', 'bytes')
                         self.send_header('Content-Disposition', f'inline; filename="{file_name}"')
                         if partial:
@@ -7395,6 +7521,11 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                         requested = str((query.get('path') or [''])[0]).strip()
                         if not requested:
                                 self._send_json({'error': 'Missing path'}, status=HTTPStatus.BAD_REQUEST)
+                                return
+
+                        lower_requested = requested.lower()
+                        if not lower_requested.endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp')):
+                                self._send_json({'error': 'Unsupported preview format'}, status=HTTPStatus.BAD_REQUEST)
                                 return
 
                         root_prefix = str(TIMELAPSE_ROOT).rstrip('/') + '/timelapse_'
@@ -7741,6 +7872,7 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                                 view_mode = str(body.get('view', 'optimal')).strip().lower()
                                 keep_up_to_date = bool(body.get('keep_up_to_date', False))
                                 interval_seconds = int(body.get('interval_seconds', 30))
+                                include_raw = bool(body.get('include_raw', False))
                         except Exception:
                                 self._send_json({'ok': False, 'error': 'Invalid JSON body'}, status=HTTPStatus.BAD_REQUEST)
                                 return
@@ -7753,6 +7885,7 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
                                         view=view_mode,
                                         watch=keep_up_to_date,
                                         interval_seconds=interval_seconds,
+                                        include_raw=include_raw,
                                 )
                         if result.get('ok'):
                                 self._send_json(result)
@@ -7828,6 +7961,8 @@ class CameraHTTPHandler(BaseHTTPRequestHandler):
         def log_message(self, _format, *args):
                 try:
                         request_line = str(getattr(self, 'requestline', '') or '')
+                        if '/api/timelapse-export-media' in request_line:
+                                return
                         ua = str(self.headers.get('User-Agent', '-'))
                         print(f"[http] {self.address_string()} {request_line} | ua={ua}")
                 except Exception:
