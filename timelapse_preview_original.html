@@ -22,14 +22,14 @@
                 .header {
                         background: #1a1a1a;
                         border-bottom: 2px solid var(--accent);
-                        padding: 15px 20px;
+                        padding: 9px 16px;
                         display: flex;
                         align-items: center;
                         justify-content: space-between;
                         gap: 12px;
                         flex-wrap: wrap;
                 }
-                .header h1 { color: var(--accent); margin: 0; font-size: 1.5em; }
+                .header h1 { color: var(--accent); margin: 0; font-size: 1.25em; }
                 .nav { display: flex; gap: 15px; flex-wrap: wrap; align-items: center; }
                 .nav a { color: var(--muted); text-decoration: none; padding: 5px 10px; border-radius: 4px; transition: all .3s; display: inline-flex; align-items: center; justify-content: center; min-width: 96px; }
                 .nav a:hover { color: var(--ink); background: #333; }
@@ -39,8 +39,8 @@
                 .nav select { background: #111; border: 1px solid #333; color: #fff; border-radius: 4px; padding: 5px 8px; width: 150px; }
                 .wrap {
                         max-width: 1500px;
-                        margin: 18px auto;
-                        padding: 0 14px 28px;
+                        margin: 10px auto;
+                        padding: 0 14px 18px;
                         overflow-x: auto;
                         overflow-y: visible;
                 }
@@ -48,7 +48,46 @@
                 .sub { color: var(--muted); font-size: .88rem; margin-bottom: 12px; }
                 .toolbar {
                         display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-                        margin-bottom: 10px;
+                        margin-bottom: 6px;
+                }
+                .side-drawer-handle {
+                        position: fixed;
+                        top: 52%;
+                        transform: translateY(-50%);
+                        z-index: 9005;
+                        border: 1px solid #2f4f69;
+                        background: rgba(18, 34, 46, 0.9);
+                        color: #cfe9ff;
+                        width: 34px;
+                        height: 34px;
+                        padding: 0;
+                        border-radius: 999px;
+                        font-size: .78rem;
+                        line-height: 1;
+                        letter-spacing: .02em;
+                        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.32);
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                }
+                .side-drawer-handle:hover {
+                        border-color: #5a8ab3;
+                        background: rgba(24, 48, 67, 0.94);
+                }
+                .side-drawer-handle.left {
+                        left: 6px;
+                }
+                .side-drawer-handle.right {
+                        right: 6px;
+                }
+                .side-drawer-handle .chev {
+                        font-size: 1.06rem;
+                }
+                body.metadata-drawer-open .side-drawer-handle.left {
+                        left: calc(min(360px, 30vw) + 18px);
+                }
+                body.charts-drawer-open .side-drawer-handle.right {
+                        right: calc(min(320px, 26vw) + 18px);
                 }
                 .view-chip {
                         display: inline-flex;
@@ -233,11 +272,111 @@
                 button.video-ready:hover { filter: brightness(1.06); }
                 label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .85rem; }
                 .main-grid {
-                        display: grid;
-                        grid-template-columns: 420px minmax(0, 1fr) 280px;
-                        min-width: 1120px;
+                        display: block;
+                        min-width: 0;
                         gap: 12px;
                         align-items: start;
+                }
+                .stage-col {
+                        max-width: 100%;
+                        margin: 0 auto;
+                        transition: margin .2s ease, max-width .2s ease;
+                }
+                body.metadata-drawer-open .stage-col {
+                        margin-left: calc(min(360px, 30vw) + 12px);
+                        margin-right: 0;
+                        max-width: calc(100% - min(360px, 30vw) - 12px);
+                }
+                body.charts-drawer-open .stage-col {
+                        margin-left: 0;
+                        margin-right: calc(min(320px, 26vw) + 12px);
+                        max-width: calc(100% - min(320px, 26vw) - 12px);
+                }
+                body.metadata-drawer-open.charts-drawer-open .stage-col {
+                        margin-left: calc(min(360px, 30vw) + 12px);
+                        margin-right: calc(min(320px, 26vw) + 12px);
+                        max-width: calc(100% - min(360px, 30vw) - min(320px, 26vw) - 24px);
+                }
+                body.metadata-drawer-open,
+                body.charts-drawer-open {
+                        overflow-x: hidden;
+                }
+                .drawer-backdrop {
+                        position: fixed;
+                        inset: 0;
+                        background: rgba(0, 0, 0, 0.38);
+                        z-index: 8800;
+                        opacity: 0;
+                        pointer-events: none;
+                        transition: opacity .18s ease;
+                }
+                .drawer-backdrop.show {
+                        opacity: 1;
+                        pointer-events: auto;
+                }
+                .side-panel-drawer {
+                        position: fixed;
+                        top: 170px;
+                        bottom: 10px;
+                        z-index: 8900;
+                        width: min(360px, 30vw);
+                        overflow-y: auto;
+                        overscroll-behavior: contain;
+                        transition: transform .2s ease, opacity .18s ease;
+                        opacity: 0;
+                        pointer-events: none;
+                }
+                .side-panel-drawer .panel {
+                        min-height: 100%;
+                        height: auto;
+                        overflow: visible;
+                        -webkit-overflow-scrolling: touch;
+                }
+                .side-panel-left {
+                        left: 10px;
+                        transform: translateX(calc(-100% - 22px));
+                        scrollbar-width: none;
+                        -ms-overflow-style: none;
+                }
+                .side-panel-left::-webkit-scrollbar {
+                        width: 0;
+                        height: 0;
+                        display: none;
+                }
+                .side-panel-right {
+                        right: 10px;
+                        width: min(320px, 26vw);
+                        transform: translateX(calc(100% + 22px));
+                }
+                .side-panel-drawer.open {
+                        transform: translateX(0);
+                        opacity: 1;
+                        pointer-events: auto;
+                }
+                .stage {
+                        position: relative;
+                        min-height: min(52vh, 420px);
+                }
+                @media (max-height: 900px) {
+                        .header {
+                                padding: 7px 12px;
+                        }
+                        .header h1 {
+                                font-size: 1.1em;
+                        }
+                        .nav {
+                                gap: 10px;
+                        }
+                        .wrap {
+                                margin: 6px auto;
+                                padding: 0 12px 12px;
+                        }
+                        .toolbar {
+                                margin-bottom: 4px;
+                        }
+                        .stage {
+                                min-height: min(44vh, 340px);
+                        }
                 }
                 @media (max-width: 932px) {
                         .ios-phone .wrap {
@@ -251,6 +390,44 @@
                                 min-width: 0;
                                 width: 100%;
                         }
+                        .ios-phone .side-drawer-handle {
+                                top: auto;
+                                bottom: 26px;
+                                transform: none;
+                        }
+                        .ios-phone .side-drawer-handle.left {
+                                left: 8px;
+                        }
+                        .ios-phone .side-drawer-handle.right {
+                                right: 8px;
+                        }
+                        .ios-phone .side-panel-drawer {
+                                top: 132px;
+                                bottom: 8px;
+                                width: min(94vw, 520px);
+                        }
+                        .ios-phone .side-panel-left {
+                                left: 8px;
+                                transform: translateX(calc(-100% - 14px));
+                        }
+                        .ios-phone .side-panel-right {
+                                right: 8px;
+                                width: min(94vw, 520px);
+                                transform: translateX(calc(100% + 14px));
+                        }
+                        body.metadata-drawer-open .stage-col,
+                        body.charts-drawer-open .stage-col,
+                        body.metadata-drawer-open.charts-drawer-open .stage-col {
+                                margin-left: 0;
+                                margin-right: 0;
+                                max-width: 100%;
+                        }
+                        body.metadata-drawer-open .side-drawer-handle.left {
+                                left: 8px;
+                        }
+                        body.charts-drawer-open .side-drawer-handle.right {
+                                right: 8px;
+                        }
                         .ios-phone .stage-col,
                         .ios-phone .stage,
                         .ios-phone .timeline-wrap,
@@ -262,7 +439,7 @@
                         .ios-phone .ai-col { order: 2; }
                         .ios-phone .side-col { order: 3; }
                         .ios-phone .stage {
-                                min-height: 0;
+                                min-height: min(42dvh, 320px);
                                 height: auto;
                                 aspect-ratio: auto;
                                 max-height: none;
@@ -398,8 +575,6 @@
                 body.stage-fullscreen-active #frameImg {
                         max-height: calc(100dvh - 56px - env(safe-area-inset-top));
                 }
-                body.stage-fullscreen-active #prevBtn,
-                body.stage-fullscreen-active #nextBtn,
                 body.stage-fullscreen-active .tl-pos {
                         display: none;
                 }
@@ -407,10 +582,17 @@
                 body.stage-fullscreen-active .section-delete-controls {
                         display: none !important;
                 }
+                body.stage-fullscreen-active .side-panel-drawer,
+                body.stage-fullscreen-active .drawer-backdrop,
+                body.stage-fullscreen-active .side-drawer-handle {
+                        display: none !important;
+                }
                 body.stage-pseudo-fullscreen .header,
                 body.stage-pseudo-fullscreen .toolbar,
                 body.stage-pseudo-fullscreen .ai-col,
                 body.stage-pseudo-fullscreen .side-col,
+                body.stage-pseudo-fullscreen .drawer-backdrop,
+                body.stage-pseudo-fullscreen .side-drawer-handle,
                 body.stage-pseudo-fullscreen .meta-row,
                 body.stage-pseudo-fullscreen #statsPanel {
                         display: none !important;
@@ -460,6 +642,18 @@
                         gap: 4px;
                 }
                 .mini-fullscreen-exit { display: none; }
+                #fsBackBtn,
+                #fsForwardBtn {
+                        display: none;
+                }
+                body.stage-fullscreen-active #fsBackBtn,
+                body.stage-fullscreen-active #fsForwardBtn {
+                        display: inline-flex;
+                }
+                body.stage-fullscreen-active #loopDrawerBtn,
+                body.stage-fullscreen-active #deleteDrawerBtn {
+                        display: none;
+                }
                 body.stage-fullscreen-active .mini-fullscreen-exit { display: inline-flex; }
                 body.stage-pseudo-fullscreen .mini-fullscreen-exit { display: inline-flex; }
                 .ios-phone body.stage-pseudo-fullscreen .stage {
@@ -511,25 +705,36 @@
                         color: #b8bcc2;
                         max-width: 90%;
                         line-height: 1.35;
+                        display: none;
                 }
-                .frame-debug-watermark {
-                        position: absolute;
-                        left: 10px;
-                        bottom: 10px;
-                        z-index: 4;
-                        padding: 5px 8px;
-                        border-radius: 7px;
-                        border: 1px solid rgba(255, 255, 255, 0.26);
-                        background: rgba(0, 0, 0, 0.58);
-                        color: #e8ecf2;
-                        font-size: .74rem;
-                        line-height: 1.25;
-                        letter-spacing: .01em;
+                .timeline-wrap,
+                .tl-controls,
+                .frame-loop-controls,
+                .section-delete-controls,
+                .stage-play-toggle,
+                .stage-fullscreen-exit {
+                        transition: opacity .18s ease;
+                }
+                body.initial-stage-loading .timeline-wrap,
+                body.initial-stage-loading .tl-controls,
+                body.initial-stage-loading .frame-loop-controls,
+                body.initial-stage-loading .section-delete-controls,
+                body.initial-stage-loading .stage-play-toggle,
+                body.initial-stage-loading .stage-fullscreen-exit {
+                        opacity: 0;
                         pointer-events: none;
-                        max-width: min(92%, 560px);
-                        white-space: nowrap;
-                        overflow: hidden;
-                        text-overflow: ellipsis;
+                        visibility: hidden;
+                }
+                body.initial-stage-loading .meta-row,
+                body.initial-stage-loading .ai-drawer {
+                        opacity: 0;
+                        pointer-events: none;
+                        visibility: hidden;
+                }
+                body.initial-stage-loading #aiDrawerToggle {
+                        opacity: 0;
+                        pointer-events: none;
+                        visibility: hidden;
                 }
                 @keyframes frameStageSpin {
                         from { transform: rotate(0deg); }
@@ -591,6 +796,11 @@
                         display: flex; gap: 6px; align-items: center; margin-top: 4px;
                 }
                 .tl-controls button { padding: 5px 12px; font-size: .83rem; }
+                .tl-controls .drawer-toggle-btn.active {
+                        border-color: #4f79a1;
+                        background: #203246;
+                        color: #d7ebff;
+                }
                 .tl-pos { color: var(--muted); font-size: .82rem; margin-left: auto; }
                 .play-warmup {
                         display: none;
@@ -613,6 +823,31 @@
                         border: 2px solid #32526d;
                         border-top-color: #80c8ff;
                         animation: spin .8s linear infinite;
+                }
+                .control-drawer {
+                        margin-top: 6px;
+                        border: 1px solid transparent;
+                        border-radius: 8px;
+                        background: #141a22;
+                        box-shadow: none;
+                        padding: 0;
+                        max-height: 0;
+                        opacity: 0;
+                        overflow: hidden;
+                        pointer-events: none;
+                        transition: max-height .2s ease, opacity .16s ease, box-shadow .16s ease, border-color .16s ease;
+                }
+                .control-drawer.open {
+                        max-height: 220px;
+                        opacity: 1;
+                        pointer-events: auto;
+                        border-color: rgba(92, 190, 255, 0.82);
+                        box-shadow: 0 0 0 1px rgba(92, 190, 255, 0.2), inset 0 0 0 1px rgba(92, 190, 255, 0.08);
+                        padding: 8px;
+                }
+                .control-drawer .frame-loop-controls,
+                .control-drawer .section-delete-controls {
+                        margin-top: 0;
                 }
                 .frame-loop-controls {
                         display: flex;
@@ -856,6 +1091,10 @@
                 .panel-title {
                         color: var(--accent); font-size: .88rem; font-weight: 700; margin-bottom: 8px;
                 }
+                .side-panel-drawer .panel-title {
+                        cursor: pointer;
+                        user-select: none;
+                }
                 .ai-drawer {
                         border: 1px solid #2f2f2f;
                         border-radius: 10px;
@@ -988,6 +1227,58 @@
                         border-radius: 8px;
                         background: #131313;
                         padding: 10px;
+                }
+                .prep-mini-drawer {
+                        position: relative;
+                        margin: 6px 0 8px;
+                }
+                .prep-mini-drawer-toggle {
+                        position: absolute;
+                        left: -12px;
+                        top: 10px;
+                        z-index: 2;
+                        border: 1px solid #2f4f69;
+                        background: rgba(18, 34, 46, 0.94);
+                        color: #cfe9ff;
+                        width: 24px;
+                        height: 24px;
+                        border-radius: 999px;
+                        display: inline-flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding: 0;
+                        line-height: 1;
+                }
+                .prep-mini-drawer-toggle:hover {
+                        border-color: #5a8ab3;
+                        background: rgba(24, 48, 67, 0.96);
+                }
+                .prep-mini-drawer-toggle.active {
+                        border-color: var(--accent);
+                        background: var(--accent);
+                        color: #111;
+                }
+                .prep-mini-drawer.collapsed {
+                        min-height: 28px;
+                        margin: 2px 0 4px;
+                }
+                .prep-mini-drawer.collapsed .prep-telemetry {
+                        margin-top: 0;
+                        max-height: 0;
+                        padding-top: 0;
+                        padding-bottom: 0;
+                        border-width: 0;
+                        opacity: 0;
+                        overflow: hidden;
+                        pointer-events: none;
+                }
+                .prep-mini-drawer .prep-telemetry {
+                        transition: max-height .2s ease, opacity .16s ease, padding .16s ease, border-width .16s ease;
+                        max-height: 460px;
+                }
+                .prep-telemetry .prep-head,
+                .prep-telemetry .prep-summary {
+                        display: none;
                 }
                 .prep-head {
                         display: flex;
@@ -1182,7 +1473,7 @@
                 }
         </style>
 </head>
-<body>
+<body class="initial-stage-loading">
 <div class="header">
         <h1>MOCO JIB</h1>
         <div class="nav">
@@ -1210,10 +1501,8 @@
         <div class="sub">Loops captured frames so you can judge day-to-night ramp smoothness.</div>
 
         <div class="toolbar">
-                <button id="reloadBtn">Reload Frames</button>
                 <button id="exportVideoBtn">Export Video</button>
-                <button id="recomputeBtn">Recompute Stats (Current Dir)</button>
-                <button id="deleteFrameBtn" title="Remove current frame from this local timelapse">Delete Frame</button>
+                <button id="recomputeToolsBtn">Recompute</button>
                 <button id="playPauseBtn">Play</button>
                 <span id="playWarmupIndicator" class="play-warmup" aria-live="polite">
                         <span class="play-warmup-spinner"></span>
@@ -1229,6 +1518,13 @@
                 <button id="browseDirsBtn">Browse Dirs</button>
                 <button id="openDirBtn">Open</button>
         </div>
+
+        <button id="metadataDrawerBtn" class="side-drawer-handle left" type="button" aria-label="Open frame metadata drawer">
+                <span class="chev">&#8250;</span>
+        </button>
+        <button id="chartsDrawerBtn" class="side-drawer-handle right" type="button" aria-label="Open charts drawer">
+                <span class="chev">&#8249;</span>
+        </button>
 
         <div id="exportDrawer" class="export-drawer" aria-hidden="true">
                 <div class="export-drawer-head">
@@ -1318,85 +1614,24 @@
                 </div>
         </div>
 
+        <div id="recomputeDrawer" class="export-drawer" aria-hidden="true">
+                <div class="export-drawer-head">
+                        <div class="export-drawer-title">Recompute</div>
+                        <div class="export-drawer-actions">
+                                <button id="reloadBtn">Reload Frames</button>
+                                <button id="recomputeBtn">Recompute Stats (Current Dir)</button>
+                        </div>
+                </div>
+                <div id="recomputeDirInfo" class="export-drawer-context">Directory: -</div>
+                <div class="ffmpeg-preview">Reload refreshes frame listings and preview state. Recompute clears cached analysis for the current directory and re-runs warmup.</div>
+        </div>
+
+        <div id="drawerBackdrop" class="drawer-backdrop" aria-hidden="true"></div>
+
         <div class="main-grid">
-                <div class="ai-col">
-                        <div class="panel" id="statsPanel">
-                                <div class="panel-title">Frame Metadata</div>
-                                Loading...
-                        </div>
-                </div>
-
-                <div class="stage-col">
-                        <div class="stage"><button id="stageFullscreenExit" class="stage-fullscreen-exit" type="button" aria-label="Exit fullscreen">Exit Fullscreen</button><button id="stagePlayToggle" class="stage-play-toggle" type="button" aria-label="Play or pause timelapse">Play</button><img id="frameImg" class="first-load-pending" alt="Timelapse frame" /><div id="frameStageOverlay" class="stage-overlay show"><div class="stage-spinner"></div><div id="frameStageOverlayLabel" class="stage-overlay-label">Loading frames...</div></div><div id="frameDebugWatermark" class="frame-debug-watermark">Frame debug: waiting</div></div>
-
-                        <div class="timeline-wrap">
-                                <div id="sharedTimelineTrack" class="timeline-marker-track" title="Loop and delete range markers">
-                                        <div id="frameLoopRange" class="video-loop-range"></div>
-                                        <div id="frameLoopInMarker" class="video-loop-marker loop"></div>
-                                        <div id="frameLoopOutMarker" class="video-loop-marker loop out"></div>
-                                        <div id="deleteLoopRange" class="video-loop-range"></div>
-                                        <div id="deleteLoopInMarker" class="video-loop-marker delete"></div>
-                                        <div id="deleteLoopOutMarker" class="video-loop-marker delete out"></div>
-                                </div>
-                                <div class="tl-bubble" id="tlBubble">1/1</div>
-                                <input type="range" id="tlScrub" min="1" max="1" value="1" disabled>
-                        </div>
-                        <div class="tl-controls">
-                                <button id="prevBtn" title="Previous frame">&laquo; Prev</button>
-                                <button id="nextBtn" title="Next frame">Next &raquo;</button>
-                                <button id="miniPlayPauseBtn" title="Play/Pause">Play</button>
-                                <button id="miniExitFullscreenBtn" class="mini-fullscreen-exit" title="Exit fullscreen">Exit Fullscreen</button>
-                                <span class="tl-pos" id="tlPos">-- / --</span>
-                        </div>
-                        <div class="frame-loop-controls">
-                                <button id="frameLoopInBtn" type="button">Set Loop In</button>
-                                <button id="frameLoopOutBtn" type="button">Set Loop Out</button>
-                                <button id="frameLoopPlayBtn" type="button">Play</button>
-                                <button id="frameLoopClearBtn" type="button">Clear Loop</button>
-                                <button id="loopModeToggleBtn" type="button">Loop Off</button>
-                                <span id="frameLoopReadout" class="frame-loop-readout">Loop: full range</span>
-                        </div>
-                        <div class="section-delete-controls">
-                                <button id="deleteMarkInBtn" type="button">Mark Delete In</button>
-                                <button id="deleteMarkOutBtn" type="button">Mark Delete Out</button>
-                                <button id="deleteMarkClearBtn" type="button">Clear Marks</button>
-                                <button id="deleteSectionBtn" type="button">Delete Marked Section</button>
-                                <span id="deleteSectionReadout" class="section-delete-readout">Delete section: not set</span>
-                        </div>
-                        <div class="meta-row" id="metaRow">Loading...</div>
-                        <div class="ai-drawer" id="aiDrawer">
-                                <button id="aiDrawerToggle" class="ai-drawer-toggle" type="button" aria-expanded="false">AI Analysis (Show)</button>
-                                <div id="aiDrawerBody" class="ai-drawer-body">
-                                        <div class="panel" id="aiPanel">
-                                                <div class="panel-title">AI Analysis</div>
-                                                <div class="stat-card">Loading...</div>
-                                        </div>
-                                </div>
-                        </div>
-                </div>
-
-                <div class="side-col">
-                        <div class="panel">
-                                <div class="panel-title">Charts</div>
-                                <div class="chart-block">
-                                        <div class="chart-label">Luma Histogram</div>
-                                        <div class="hist-spinner-wrap">
-                                        <canvas id="histCanvas" width="260" height="140"></canvas>
-                                        <div class="hist-spinner-overlay" id="histSpinner"><div class="hist-spinner"></div></div>
-                                        </div>
-                                </div>
-                                <div class="hist-footer">
-                                        <span class="hist-status" id="histStatus">Histogram pending...</span>
-                                        <button class="hist-gen-btn" id="histGenBtn">Generate</button>
-                                </div>
-                                <div class="chart-block">
-                                        <div class="chart-label">Waveform Monitor</div>
-                                        <canvas id="waveCanvas" class="chart-canvas" width="260" height="110"></canvas>
-                                </div>
-                                <div class="chart-block">
-                                        <div class="chart-label">RGB Parade</div>
-                                        <canvas id="paradeCanvas" class="chart-canvas" width="260" height="110"></canvas>
-                                </div>
+                <div id="metadataDrawer" class="ai-col side-panel-drawer side-panel-left" aria-hidden="true">
+                        <div id="prepMiniDrawer" class="prep-mini-drawer collapsed">
+                                <button id="prepMiniDrawerBtn" class="prep-mini-drawer-toggle" type="button" aria-label="Expand warmup drawer" aria-expanded="false"><span class="chev">&#8250;</span></button>
                                 <div class="prep-telemetry" id="prepTelemetry">
                                         <div class="prep-head"><span id="prepPhase">Idle</span><span class="prep-pct" id="prepPct">0%</span></div>
                                         <div class="prep-summary" id="prepSummary">Ready. Press Play to start immediately while metadata warms in background.</div>
@@ -1422,6 +1657,93 @@
                                                 <div class="prep-chip" id="prepCpu">CPU: -</div>
                                         </div>
                                         <div class="prep-strategy" id="prepStrategy">Strategy: adaptive two-phase pipeline.</div>
+                                </div>
+                        </div>
+                        <div class="panel" id="statsPanel">
+                                <div class="panel-title">Frame Metadata</div>
+                                Loading...
+                        </div>
+                </div>
+
+                <div class="stage-col">
+                        <div class="stage"><button id="stageFullscreenExit" class="stage-fullscreen-exit" type="button" aria-label="Exit fullscreen">Exit Fullscreen</button><button id="stagePlayToggle" class="stage-play-toggle" type="button" aria-label="Play or pause timelapse">Play</button><img id="frameImg" class="first-load-pending" alt="Timelapse frame" /><div id="frameStageOverlay" class="stage-overlay show"><div class="stage-spinner"></div><div id="frameStageOverlayLabel" class="stage-overlay-label">Loading frames...</div></div></div>
+
+                        <div class="timeline-wrap">
+                                <div id="sharedTimelineTrack" class="timeline-marker-track" title="Loop and delete range markers">
+                                        <div id="frameLoopRange" class="video-loop-range"></div>
+                                        <div id="frameLoopInMarker" class="video-loop-marker loop"></div>
+                                        <div id="frameLoopOutMarker" class="video-loop-marker loop out"></div>
+                                        <div id="deleteLoopRange" class="video-loop-range"></div>
+                                        <div id="deleteLoopInMarker" class="video-loop-marker delete"></div>
+                                        <div id="deleteLoopOutMarker" class="video-loop-marker delete out"></div>
+                                </div>
+                                <div class="tl-bubble" id="tlBubble">1/1</div>
+                                <input type="range" id="tlScrub" min="1" max="1" value="1" disabled>
+                        </div>
+                        <div class="tl-controls">
+                                <button id="prevBtn" title="Previous frame">&laquo; Prev</button>
+                                <button id="nextBtn" title="Next frame">Next &raquo;</button>
+                                <button id="miniPlayPauseBtn" title="Play/Pause">Play</button>
+                                <button id="fsBackBtn" class="drawer-toggle-btn" type="button" title="Set playback direction to backward">Back</button>
+                                <button id="fsForwardBtn" class="drawer-toggle-btn" type="button" title="Set playback direction to forward">Forward</button>
+                                <button id="loopDrawerBtn" class="drawer-toggle-btn" type="button" title="Open loop controls drawer">Loop</button>
+                                <button id="deleteDrawerBtn" class="drawer-toggle-btn" type="button" title="Open delete controls drawer">Delete</button>
+                                <button id="miniExitFullscreenBtn" class="mini-fullscreen-exit" title="Exit fullscreen">Exit Fullscreen</button>
+                                <span class="tl-pos" id="tlPos">-- / --</span>
+                        </div>
+                        <div id="loopDrawer" class="control-drawer" aria-hidden="true">
+                                <div class="frame-loop-controls">
+                                        <button id="frameLoopInBtn" type="button">Set Loop In</button>
+                                        <button id="frameLoopOutBtn" type="button">Set Loop Out</button>
+                                        <button id="frameLoopPlayBtn" type="button">Play</button>
+                                        <button id="frameLoopClearBtn" type="button">Clear Loop</button>
+                                        <button id="loopModeToggleBtn" type="button">Loop Off</button>
+                                        <span id="frameLoopReadout" class="frame-loop-readout">Loop: full range</span>
+                                </div>
+                        </div>
+                        <div id="deleteDrawer" class="control-drawer" aria-hidden="true">
+                                <div class="section-delete-controls">
+                                        <button id="deleteMarkInBtn" type="button">Mark Delete In</button>
+                                        <button id="deleteMarkOutBtn" type="button">Mark Delete Out</button>
+                                        <button id="deleteMarkClearBtn" type="button">Clear Marks</button>
+                                        <button id="deleteFrameBtn" type="button" title="Remove current frame from this local timelapse">Delete Frame</button>
+                                        <button id="deleteSectionBtn" type="button">Delete Marked Section</button>
+                                        <span id="deleteSectionReadout" class="section-delete-readout">Delete section: not set</span>
+                                </div>
+                        </div>
+                        <div class="meta-row" id="metaRow">Loading...</div>
+                        <div class="ai-drawer" id="aiDrawer">
+                                <button id="aiDrawerToggle" class="ai-drawer-toggle" type="button" aria-expanded="false">AI Analysis (Show)</button>
+                                <div id="aiDrawerBody" class="ai-drawer-body">
+                                        <div class="panel" id="aiPanel">
+                                                <div class="panel-title">AI Analysis</div>
+                                                <div class="stat-card">Loading...</div>
+                                        </div>
+                                </div>
+                        </div>
+                </div>
+
+                <div id="chartsDrawer" class="side-col side-panel-drawer side-panel-right" aria-hidden="true">
+                        <div class="panel">
+                                <div class="panel-title">Charts</div>
+                                <div class="chart-block">
+                                        <div class="chart-label">Luma Histogram</div>
+                                        <div class="hist-spinner-wrap">
+                                        <canvas id="histCanvas" width="260" height="140"></canvas>
+                                        <div class="hist-spinner-overlay" id="histSpinner"><div class="hist-spinner"></div></div>
+                                        </div>
+                                </div>
+                                <div class="hist-footer">
+                                        <span class="hist-status" id="histStatus">Histogram pending...</span>
+                                        <button class="hist-gen-btn" id="histGenBtn">Generate</button>
+                                </div>
+                                <div class="chart-block">
+                                        <div class="chart-label">Waveform Monitor</div>
+                                        <canvas id="waveCanvas" class="chart-canvas" width="260" height="110"></canvas>
+                                </div>
+                                <div class="chart-block">
+                                        <div class="chart-label">RGB Parade</div>
+                                        <canvas id="paradeCanvas" class="chart-canvas" width="260" height="110"></canvas>
                                 </div>
                         </div>
                 </div>
@@ -1466,6 +1788,7 @@
         if (/iPhone/i.test(ua)) document.documentElement.classList.add('ios-phone');
         const isLikelyIPhone = /iPhone|iPod/i.test(ua);
         const isLikelyIPad = /iPad/i.test(ua) || (/Macintosh/i.test(ua) && Number(navigator.maxTouchPoints || 0) > 1);
+        const isLikelyIOS = isLikelyIPhone || isLikelyIPad;
         const useIosPlaybackFastPath = isLikelyIPhone || isLikelyIPad;
         const useIosRenderNonce = false;
 
@@ -1478,6 +1801,12 @@
         const aiDrawerToggle = document.getElementById('aiDrawerToggle');
         const aiPanel = document.getElementById('aiPanel');
         const statsPanel = document.getElementById('statsPanel');
+        const metadataDrawerBtn = document.getElementById('metadataDrawerBtn');
+        const chartsDrawerBtn = document.getElementById('chartsDrawerBtn');
+        const metadataDrawer = document.getElementById('metadataDrawer');
+        const chartsDrawer = document.getElementById('chartsDrawer');
+        const drawerBackdrop = document.getElementById('drawerBackdrop');
+        const recomputeToolsBtn = document.getElementById('recomputeToolsBtn');
         const recomputeBtn = document.getElementById('recomputeBtn');
         const deleteFrameBtn = document.getElementById('deleteFrameBtn');
         const playPauseBtn = document.getElementById('playPauseBtn');
@@ -1489,6 +1818,7 @@
         const closeBtn = document.getElementById('closeBtn');
         const exportVideoBtn = document.getElementById('exportVideoBtn');
         const exportDrawer = document.getElementById('exportDrawer');
+        const recomputeDrawer = document.getElementById('recomputeDrawer');
         const exportRunBtn = document.getElementById('exportRunBtn');
         const viewVideoBtn = document.getElementById('viewVideoBtn');
         const editLoopBtn = document.getElementById('editLoopBtn');
@@ -1516,6 +1846,7 @@
         const exportStatusPct = document.getElementById('exportStatusPct');
         const exportProgressBar = document.getElementById('exportProgressBar');
         const exportDirInfo = document.getElementById('exportDirInfo');
+        const recomputeDirInfo = document.getElementById('recomputeDirInfo');
         const dirSelect = document.getElementById('dirSelect');
         const browseDirsBtn = document.getElementById('browseDirsBtn');
         const openDirBtn = document.getElementById('openDirBtn');
@@ -1548,6 +1879,12 @@
         const prevBtn = document.getElementById('prevBtn');
         const nextBtn = document.getElementById('nextBtn');
         const miniPlayPauseBtn = document.getElementById('miniPlayPauseBtn');
+        const fsBackBtn = document.getElementById('fsBackBtn');
+        const fsForwardBtn = document.getElementById('fsForwardBtn');
+        const loopDrawerBtn = document.getElementById('loopDrawerBtn');
+        const deleteDrawerBtn = document.getElementById('deleteDrawerBtn');
+        const loopDrawer = document.getElementById('loopDrawer');
+        const deleteDrawer = document.getElementById('deleteDrawer');
         const miniExitFullscreenBtn = document.getElementById('miniExitFullscreenBtn');
         const histCanvas = document.getElementById('histCanvas');
         const histCtx = histCanvas.getContext('2d');
@@ -1595,18 +1932,24 @@
         const prepPerfEl = document.getElementById('prepPerf');
         const prepCpuEl = document.getElementById('prepCpu');
         const prepStrategyEl = document.getElementById('prepStrategy');
+        const prepMiniDrawerEl = document.getElementById('prepMiniDrawer');
+        const prepMiniDrawerBtn = document.getElementById('prepMiniDrawerBtn');
         const stageEl = document.querySelector('.stage');
+        const stageColEl = document.querySelector('.stage-col');
         const frameStageOverlay = document.getElementById('frameStageOverlay');
         const frameStageOverlayLabel = document.getElementById('frameStageOverlayLabel');
-        const frameDebugWatermark = document.getElementById('frameDebugWatermark');
         const deleteToast = document.getElementById('deleteToast');
 
         let frames = [];
         let index = 0;
         let timer = null;
+        let playbackRafId = 0;
+        let playbackLastTickTs = 0;
+        let playbackAccumulatorMs = 0;
         let frameAutoRefreshTimer = null;
         let frameAutoRefreshInFlight = false;
         let playing = false;
+        let playbackDirection = 1;
         let timelapseDirectory = 'timelapse';
         let timelapseView = 'optimal';
         let frameLoopInIndex = 0;
@@ -1658,6 +2001,8 @@
         let lastPlaybackBgWorkAt = 0;
         let lastPlaybackHistogramBgWorkAt = 0;
         let lastPlaybackMetadataRenderAt = 0;
+        let lastPlaybackHistogramRenderAt = 0;
+        let lastPlaybackChartsRenderAt = 0;
         let iosRenderNonce = 0;
         let frameSwapInFlight = false;
         let firstFrameResolved = false;
@@ -1668,11 +2013,16 @@
         let videoLoopInSec = 0;
         let videoLoopOutSec = null;
         let prepCapacityRefreshBusy = false;
+        let prepUiAutoState = 'idle';
         const relayOrigin = 'http://127.0.0.1:18080';
         const currentOrigin = (window && window.location && window.location.origin) ? String(window.location.origin) : '';
         const viewerBaseOrigin = (currentOrigin && /^https?:\/\//i.test(currentOrigin)) ? currentOrigin : relayOrigin;
         let mainAppOrigin = viewerBaseOrigin;
         const serverCapacity = { cpu_count: null, idle_pct: null, load_pct: null, python_cpu_pct: null };
+        const PLAYBACK_METADATA_RENDER_INTERVAL_MS = 420;
+        const PLAYBACK_HISTOGRAM_BG_FETCH_INTERVAL_MS = 320;
+        const PLAYBACK_HISTOGRAM_RENDER_INTERVAL_MS = 140;
+        const PLAYBACK_CHART_RENDER_INTERVAL_MS = 160;
         const prepTelemetry = {
                 phase: 'Idle',
                 done: 0,
@@ -2394,6 +2744,82 @@
                 exportVideoBtn.classList.toggle('active', isOpen);
         }
 
+        function setRecomputeDrawerOpen(open) {
+                if (!recomputeDrawer) return;
+                const isOpen = !!open;
+                recomputeDrawer.classList.toggle('open', isOpen);
+                recomputeDrawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+                if (recomputeToolsBtn) recomputeToolsBtn.classList.toggle('active', isOpen);
+        }
+
+        function updateSideDrawersBackdrop() {
+                if (!drawerBackdrop) return;
+                drawerBackdrop.classList.remove('show');
+                drawerBackdrop.setAttribute('aria-hidden', 'true');
+        }
+
+        function setMetadataDrawerOpen(open) {
+                if (!metadataDrawer) return;
+                const isOpen = !!open;
+                metadataDrawer.classList.toggle('open', isOpen);
+                metadataDrawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+                if (metadataDrawerBtn) {
+                        metadataDrawerBtn.classList.toggle('active', isOpen);
+                        metadataDrawerBtn.setAttribute('aria-label', isOpen ? 'Close frame metadata drawer' : 'Open frame metadata drawer');
+                        metadataDrawerBtn.innerHTML = isOpen
+                                ? '<span class="chev">&#8249;</span>'
+                                : '<span class="chev">&#8250;</span>';
+                }
+                document.body.classList.toggle('metadata-drawer-open', isOpen);
+                updateSideDrawersBackdrop();
+                if (isOpen && frames[index] && frames[index].name) {
+                        renderFrameMetadata(frames[index].name);
+                        refreshAiTelemetryFromCurrentState();
+                }
+        }
+
+        function setChartsDrawerOpen(open) {
+                if (!chartsDrawer) return;
+                const isOpen = !!open;
+                chartsDrawer.classList.toggle('open', isOpen);
+                chartsDrawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+                if (chartsDrawerBtn) {
+                        chartsDrawerBtn.classList.toggle('active', isOpen);
+                        chartsDrawerBtn.setAttribute('aria-label', isOpen ? 'Close charts drawer' : 'Open charts drawer');
+                        chartsDrawerBtn.innerHTML = isOpen
+                                ? '<span class="chev">&#8250;</span>'
+                                : '<span class="chev">&#8249;</span>';
+                }
+                document.body.classList.toggle('charts-drawer-open', isOpen);
+                updateSideDrawersBackdrop();
+                if (isOpen && frames[index] && frames[index].name) {
+                        renderHistogramForFrame(frames[index].name);
+                        renderRightChartsForFrame(frames[index].name);
+                }
+        }
+
+        function isMetadataDrawerOpen() {
+                return !!(metadataDrawer && metadataDrawer.classList.contains('open'));
+        }
+
+        function isChartsDrawerOpen() {
+                return !!(chartsDrawer && chartsDrawer.classList.contains('open'));
+        }
+
+        function setPrepMiniDrawerOpen(open) {
+                if (!prepMiniDrawerEl) return;
+                const isOpen = !!open;
+                prepMiniDrawerEl.classList.toggle('collapsed', !isOpen);
+                if (prepMiniDrawerBtn) {
+                        prepMiniDrawerBtn.classList.toggle('active', isOpen);
+                        prepMiniDrawerBtn.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+                        prepMiniDrawerBtn.setAttribute('aria-label', isOpen ? 'Collapse warmup drawer' : 'Expand warmup drawer');
+                        prepMiniDrawerBtn.innerHTML = isOpen
+                                ? '<span class="chev">&#8249;</span>'
+                                : '<span class="chev">&#8250;</span>';
+                }
+        }
+
         function showDeleteToast(message) {
                 if (!deleteToast) return;
                 deleteToast.textContent = String(message || 'Deleted.');
@@ -2467,6 +2893,10 @@
                 if (!frameStageOverlay) return;
                 frameStageOverlay.classList.remove('show');
                 frameStageOverlay.classList.remove('placeholder');
+        }
+
+        function setInitialStageLoading(active) {
+                document.body.classList.toggle('initial-stage-loading', !!active);
         }
 
         function setFrameImageSource(url, loadingMessage) {
@@ -2902,6 +3332,8 @@
                 playPauseBtn.classList.toggle('active', playing);
                 if (miniPlayPauseBtn) miniPlayPauseBtn.textContent = playing ? 'Pause' : 'Play';
                 if (stagePlayToggle) stagePlayToggle.textContent = playing ? 'Pause' : 'Play';
+                if (prevBtn) prevBtn.textContent = playing ? '\u00ab Back' : '\u00ab Prev';
+                if (nextBtn) nextBtn.textContent = playing ? 'Forward \u00bb' : 'Next \u00bb';
                 if (frameLoopPlayBtn) frameLoopPlayBtn.disabled = !frames.length || playing;
                 if (playWarmupIndicator) {
                         playWarmupIndicator.classList.toggle('show', !!playing && !playbackReady);
@@ -2957,7 +3389,10 @@
         }
 
         function currentPrepSignature() {
-                return String(timelapseDirectory || 'timelapse') + '|' + normalizeTimelapseView(timelapseView) + '|' + String(Array.isArray(frames) ? frames.length : 0);
+                const total = Array.isArray(frames) ? frames.length : 0;
+                const first = (total > 0 && frames[0] && frames[0].name) ? String(frames[0].name) : '';
+                const last = (total > 0 && frames[total - 1] && frames[total - 1].name) ? String(frames[total - 1].name) : '';
+                return String(timelapseDirectory || 'timelapse') + '|' + normalizeTimelapseView(timelapseView) + '|' + String(total) + '|' + first + '|' + last;
         }
 
         function markReturnAutoplayPreference() {
@@ -3299,6 +3734,7 @@
                 const done = Math.max(0, Math.min(total || Number.MAX_SAFE_INTEGER, Number(prepTelemetry.done) || 0));
                 const activeWorkers = Math.max(0, Number(prepTelemetry.activeWorkers) || 0);
                 const queued = Math.max(0, Number(prepTelemetry.queued) || 0);
+                const loadingActive = total > 0 && !prepTelemetry.complete;
                 if (total > 0 && done >= total && activeWorkers === 0 && queued === 0) {
                         prepTelemetry.complete = true;
                         if (!prepTelemetry.phase || prepTelemetry.phase === 'Incomplete') {
@@ -3335,6 +3771,20 @@
                         summary = 'Warmup complete. Playback and AI telemetry are fully primed.';
                 }
                 prepSummaryEl.textContent = summary;
+
+                if (loadingActive && prepUiAutoState !== 'loading') {
+                        setMetadataDrawerOpen(true);
+                        setPrepMiniDrawerOpen(true);
+                        prepUiAutoState = 'loading';
+                } else if (prepTelemetry.complete && total > 0 && prepUiAutoState !== 'complete') {
+                        setPrepMiniDrawerOpen(false);
+                        setMetadataDrawerOpen(false);
+                        setChartsDrawerOpen(false);
+                        prepUiAutoState = 'complete';
+                } else if (!loadingActive && !(prepTelemetry.complete && total > 0) && total === 0) {
+                        prepUiAutoState = 'idle';
+                }
+
                 prepTelemetryEl.classList.toggle('complete', !!prepTelemetry.complete);
                 updateTelemetryTrackVisuals();
         }
@@ -3383,11 +3833,17 @@
                 } catch (_) {
                 }
                 updateExportDrawerContext();
+                updateRecomputeDrawerContext();
         }
 
         function updateExportDrawerContext() {
                 if (!exportDirInfo) return;
                 exportDirInfo.textContent = 'Directory: ' + String(timelapseDirectory || 'timelapse') + ' | View: ' + String(normalizeTimelapseView(timelapseView)).toUpperCase();
+        }
+
+        function updateRecomputeDrawerContext() {
+                if (!recomputeDirInfo) return;
+                recomputeDirInfo.textContent = 'Directory: ' + String(timelapseDirectory || 'timelapse') + ' | View: ' + String(normalizeTimelapseView(timelapseView)).toUpperCase();
         }
 
         function updateViewUi() {
@@ -3483,10 +3939,19 @@
                         return Math.min(cap, Math.round(cssWidth * dpr));
                 }
                 if (isLikelyIPad) return 2752;
+                const dpr = Number(window.devicePixelRatio || 1) || 1;
+                const cssWidth = Math.max(
+                        1,
+                        Number(window.innerWidth || 0),
+                        Number((document.documentElement && document.documentElement.clientWidth) || 0),
+                        Number((window.screen && window.screen.width) || 0)
+                );
+                const requestedWidth = Math.max(1, Math.round(cssWidth * dpr));
                 if (window.screen && window.screen.width && window.screen.width < 1400) {
-                        return Math.min(1280, Math.round(window.screen.width * (window.devicePixelRatio || 1)));
+                        return Math.min(1280, requestedWidth);
                 }
-                return null;
+                const desktopCap = isStageFullscreenActive() ? 1920 : 1728;
+                return Math.min(desktopCap, requestedWidth);
         }
 
         function _applyPreviewWidth(url) {
@@ -3543,6 +4008,11 @@
 
         async function loadServerCapacity() {
                 try {
+                        if (isLikelyIOS) {
+                                prepConcurrency = isLikelyIPhone ? 4 : 6;
+                                updatePrepTelemetry({});
+                                return;
+                        }
                         const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
                         const timeoutId = controller ? setTimeout(() => {
                                 try { controller.abort(); } catch (_) {}
@@ -3580,6 +4050,11 @@
                         prepConcurrency = Math.max(minFloor, Math.min(maxCap, dynamicTarget));
                         updatePrepTelemetry({});
                 } catch (_) {
+                        if (isLikelyIOS) {
+                                prepConcurrency = isLikelyIPhone ? 4 : 6;
+                                updatePrepTelemetry({});
+                                return;
+                        }
                         const hw = Number((navigator && navigator.hardwareConcurrency) || 8);
                         prepConcurrency = Math.max(48, Math.min(960, hw * 16));
                         if (!serverCapacity.cpu_count) serverCapacity.cpu_count = hw;
@@ -3644,8 +4119,9 @@
         function isStageFullscreenActive() {
                 const fsEl = getFullscreenElement();
                 if (document.body.classList.contains('stage-pseudo-fullscreen')) return true;
-                if (!fsEl || !stageEl) return false;
-                return fsEl === stageEl || stageEl.contains(fsEl) || fsEl.contains(stageEl);
+                const targetEl = stageColEl || stageEl;
+                if (!fsEl || !targetEl) return false;
+                return fsEl === targetEl || targetEl.contains(fsEl) || fsEl.contains(targetEl);
         }
 
         function updateStageFullscreenUi() {
@@ -3656,6 +4132,14 @@
                 if (stagePlayToggle) stagePlayToggle.classList.toggle('show', active && !pseudo);
                 document.body.classList.toggle('stage-fullscreen-active', active);
                 if (miniExitFullscreenBtn) miniExitFullscreenBtn.style.display = active ? 'inline-flex' : 'none';
+                if (active) {
+                        setLoopDrawerOpen(false);
+                        setDeleteDrawerOpen(false);
+                        setPlaybackDirection(playbackDirection);
+                } else {
+                        if (loopDrawerBtn) loopDrawerBtn.classList.toggle('active', !!(loopDrawer && loopDrawer.classList.contains('open')));
+                        if (deleteDrawerBtn) deleteDrawerBtn.classList.toggle('active', !!(deleteDrawer && deleteDrawer.classList.contains('open')));
+                }
         }
 
         async function exitStageFullscreen() {
@@ -3673,11 +4157,15 @@
         }
 
         async function requestStageFullscreen() {
-                if (!stageEl) return;
+                const fullscreenTarget = stageColEl || stageEl;
+                if (!fullscreenTarget) return;
                 if (isStageFullscreenActive()) {
                         await exitStageFullscreen();
                         return;
                 }
+
+                setMetadataDrawerOpen(false);
+                setChartsDrawerOpen(false);
 
                 // Force app-managed fullscreen on iPad to avoid Safari-native chrome (top-left X)
                 // and keep our Play/Exit controls consistently visible.
@@ -3689,14 +4177,20 @@
 
                 let entered = false;
                 try {
-                        if (stageEl.requestFullscreen) {
-                                await stageEl.requestFullscreen();
+                        if (fullscreenTarget.requestFullscreen) {
+                                await fullscreenTarget.requestFullscreen();
                                 entered = true;
-                        } else if (stageEl.webkitRequestFullscreen) {
-                                stageEl.webkitRequestFullscreen();
+                        } else if (fullscreenTarget.webkitRequestFullscreen) {
+                                fullscreenTarget.webkitRequestFullscreen();
                                 entered = true;
                         }
                 } catch (_) {
+                        entered = false;
+                }
+
+                // Some desktop browsers may not throw when fullscreen is denied or ignored.
+                // Verify that fullscreen actually became active before skipping fallback mode.
+                if (entered && !isStageFullscreenActive()) {
                         entered = false;
                 }
 
@@ -3753,6 +4247,7 @@
                 const limit = Math.max(50, Math.min(5000, Number(limitInput.value) || 1200));
                 prepAbortRequested = true;
                 firstFrameResolved = false;
+                setInitialStageLoading(true);
                 frameImg.classList.add('first-load-pending');
                 showFrameStageOverlay('Loading frames...', false);
                 await hydrateDirectoryCachesFromStorage(timelapseDirectory);
@@ -3818,6 +4313,7 @@
                         frameImg.removeAttribute('src');
                         frameImg.classList.remove('first-load-pending');
                         firstFrameResolved = true;
+                        setInitialStageLoading(false);
                         showFrameStageOverlay('No frames found for this timelapse.', true);
                         normalizeFrameLoopBounds();
                         updateFrameLoopUi();
@@ -3851,9 +4347,26 @@
                 if (verifiedIndex >= 0) {
                         index = verifiedIndex;
                 }
-                playbackReady = false;
-                updatePrepTelemetry({ phase: 'Warming browser cache', done: 0, total: 0, targetWorkers: 0, activeWorkers: 0, queued: 0, phase1Total: 0, phase2Total: 0, startedAt: 0, complete: false });
-                histStatus.textContent = 'Warming browser image cache before playback...';
+                const latestSignature = currentPrepSignature();
+                const shouldReuseWarmup = !!prepTelemetry.complete && !!playbackReady && prepCurrentSignature === latestSignature;
+                if (shouldReuseWarmup) {
+                        histStatus.textContent = 'Prepared 100% - ready';
+                        const totalWarm = Math.max(1, Number(prepTelemetry.total) || frames.length || 1);
+                        const doneWarm = Math.max(1, Number(prepTelemetry.done) || totalWarm);
+                        updatePrepTelemetry({
+                                phase: 'Ready',
+                                done: doneWarm,
+                                total: totalWarm,
+                                targetWorkers: Number(prepTelemetry.targetWorkers) || 0,
+                                activeWorkers: 0,
+                                queued: 0,
+                                complete: true,
+                        });
+                } else {
+                        playbackReady = false;
+                        updatePrepTelemetry({ phase: 'Warming browser cache', done: 0, total: 0, targetWorkers: 0, activeWorkers: 0, queued: 0, phase1Total: 0, phase2Total: 0, startedAt: 0, complete: false });
+                        histStatus.textContent = 'Warming browser image cache before playback...';
+                }
                 updateAiTelemetry({ done: 0, total: frames.length, activeOps: 0, queuedFrames: frames.length, startedAt: 0, complete: false });
                 playing = false;
                 setPlayUi();
@@ -3862,10 +4375,12 @@
                 metaRow.textContent = 'Loaded ' + frames.length + ' frames.';
                 restartLoop();
                 prefetchAlternateFrameView(timelapseDirectory, selectedView);
-                prepareAllFramesForPlayback().catch((err) => {
-                        const msg = (err && err.message) ? err.message : 'Background preparation failed';
-                        metaRow.textContent = msg;
-                });
+                if (!shouldReuseWarmup) {
+                        prepareAllFramesForPlayback().catch((err) => {
+                                const msg = (err && err.message) ? err.message : 'Background preparation failed';
+                                metaRow.textContent = msg;
+                        });
+                }
         }
 
         function syncTimeline() {
@@ -3894,27 +4409,16 @@
                 if (autoHide) setTimeout(() => tlBubble.classList.remove('show'), 700);
         }
 
-        function updateFrameDebugWatermark(frame) {
-                if (!frameDebugWatermark) return;
-                const deviceMode = isLikelyIPad ? 'IPAD' : (isLikelyIPhone ? 'IPHONE' : 'OTHER');
-                if (!frames.length || !frame) {
-                        frameDebugWatermark.textContent = 'Frame debug: no frame | ' + deviceMode;
-                        return;
-                }
-                const mode = playing ? 'PLAY' : 'PAUSE';
-                frameDebugWatermark.textContent = mode + ' | ' + String(index + 1) + '/' + String(frames.length) + ' | ' + String(frame.name || '-') + ' | ' + deviceMode;
-        }
-
         function renderFrame() {
                 if (!frames.length) return;
                 const preferred = findNextRenderableFrameIndex(index);
                 if (preferred >= 0) index = preferred;
                 const frame = frames[index];
-                updateFrameDebugWatermark(frame);
                 if (!frame || !frame.url || !frame.name) {
                         frameImg.removeAttribute('src');
                         frameImg.classList.remove('first-load-pending');
                         firstFrameResolved = true;
+                        setInitialStageLoading(false);
                         showFrameStageOverlay('No renderable frame available.', true);
                         metaRow.textContent = 'No renderable frame available.';
                         return;
@@ -3924,6 +4428,7 @@
                         frameImg.removeAttribute('src');
                         frameImg.classList.remove('first-load-pending');
                         firstFrameResolved = true;
+                        setInitialStageLoading(false);
                         showFrameStageOverlay('Skipping unreadable frame.', true);
                         metaRow.textContent = 'Skipped unreadable frame ' + frame.name + '.';
                         return;
@@ -3932,40 +4437,51 @@
                 setFrameImageSource(frame.url, 'Loading frame...');
                 writeStartupPreviewUrl(timelapseDirectory, frame.url);
                 const when = new Date(frame.mtime * 1000).toLocaleString();
-                metaRow.textContent = 'Frame ' + (index + 1) + '/' + frames.length + ' | ' + frame.name + ' | ' + when;
+                const deviceMode = isLikelyIPad ? 'IPAD' : (isLikelyIPhone ? 'IPHONE' : 'OTHER');
+                const playMode = playing ? 'PLAY' : 'PAUSE';
+                metaRow.textContent = deviceMode + ' | ' + playMode + ' | ' + (index + 1) + '/' + frames.length + ' | ' + frame.name + ' | ' + when;
                 syncTimeline();
-                if (!playing || (now - lastPlaybackMetadataRenderAt) >= 240) {
-                        renderFrameMetadata(frame.name);
-                        if (playing) lastPlaybackMetadataRenderAt = now;
-                }
-                if (playing) {
-                        const cacheKey = timelapseDirectory + '|' + frame.name;
-                        if (histogramCache.has(cacheKey)) {
-                                drawHistBins(histogramCache.get(cacheKey));
-                                histStatus.textContent = 'Histogram: cached';
-                        } else {
-                                if (!playbackHistogramFetchInFlight && (now - lastPlaybackHistogramBgWorkAt) >= 180) {
-                                        playbackHistogramFetchInFlight = true;
-                                        lastPlaybackHistogramBgWorkAt = now;
-                                        fetchHistogramForFrame(frame.name, false)
-                                                .then((hist) => {
-                                                        const current = frames[index] ? frames[index].name : '';
-                                                        if (current === frame.name && hist) {
-                                                                drawHistBins(hist);
-                                                                histStatus.textContent = 'Histogram: ready';
-                                                        }
-                                                })
-                                                .catch(() => {})
-                                                .finally(() => {
-                                                        playbackHistogramFetchInFlight = false;
-                                                });
-                                }
+                if (isMetadataDrawerOpen()) {
+                        if (!playing || (now - lastPlaybackMetadataRenderAt) >= PLAYBACK_METADATA_RENDER_INTERVAL_MS) {
+                                renderFrameMetadata(frame.name);
+                                if (playing) lastPlaybackMetadataRenderAt = now;
                         }
-                } else {
-                        renderHistogramForFrame(frame.name);
                 }
-                renderRightChartsForFrame(frame.name);
-                refreshAiTelemetryFromCurrentState();
+                if (isChartsDrawerOpen()) {
+                        if (playing) {
+                                const cacheKey = timelapseDirectory + '|' + frame.name;
+                                if (histogramCache.has(cacheKey)) {
+                                        if ((now - lastPlaybackHistogramRenderAt) >= PLAYBACK_HISTOGRAM_RENDER_INTERVAL_MS) {
+                                                drawHistBins(histogramCache.get(cacheKey));
+                                                histStatus.textContent = 'Histogram: cached';
+                                                lastPlaybackHistogramRenderAt = now;
+                                        }
+                                } else {
+                                        if (!playbackHistogramFetchInFlight && (now - lastPlaybackHistogramBgWorkAt) >= PLAYBACK_HISTOGRAM_BG_FETCH_INTERVAL_MS) {
+                                                playbackHistogramFetchInFlight = true;
+                                                lastPlaybackHistogramBgWorkAt = now;
+                                                fetchHistogramForFrame(frame.name, false)
+                                                        .then((hist) => {
+                                                                const current = frames[index] ? frames[index].name : '';
+                                                                if (current === frame.name && hist) {
+                                                                        drawHistBins(hist);
+                                                                        histStatus.textContent = 'Histogram: ready';
+                                                                }
+                                                        })
+                                                        .catch(() => {})
+                                                        .finally(() => {
+                                                                playbackHistogramFetchInFlight = false;
+                                                        });
+                                        }
+                                }
+                        } else {
+                                renderHistogramForFrame(frame.name);
+                        }
+                        renderRightChartsForFrame(frame.name);
+                }
+                if (isMetadataDrawerOpen()) {
+                        refreshAiTelemetryFromCurrentState();
+                }
         }
 
         async function maybeAutoRefreshFrames() {
@@ -4293,6 +4809,11 @@ self.onmessage = async (event) => {
                 const key = timelapseDirectory + '|' + frameName;
                 const cached = chartCache.get(key);
                 if (cached) {
+                        if (playing) {
+                                const now = Date.now();
+                                if ((now - lastPlaybackChartsRenderAt) < PLAYBACK_CHART_RENDER_INTERVAL_MS) return;
+                                lastPlaybackChartsRenderAt = now;
+                        }
                         drawWaveformProfile(cached.wave);
                         drawRgbParadeProfiles(cached.rp, cached.gp, cached.bp);
                         return;
@@ -4732,7 +5253,12 @@ self.onmessage = async (event) => {
                 prepAbortRequested = false;
                 prepCurrentSignature = requestedSignature;
                 const prepRunId = ++prepRunCounter;
-                const snapshot = frames.slice(0);
+                const iosWarmupMode = isLikelyIOS;
+                const prepFrameLimit = isLikelyIPhone ? 180 : (isLikelyIPad ? 320 : frames.length);
+                const prioritizedFrames = (index > 0)
+                        ? frames.slice(index).concat(frames.slice(0, index))
+                        : frames.slice(0);
+                const snapshot = prioritizedFrames.slice(0, Math.max(1, prepFrameLimit));
                 if (!snapshot.length) return;
                 const runPromise = (async () => {
                         const isStale = () => {
@@ -4765,17 +5291,20 @@ self.onmessage = async (event) => {
                                         .filter(f => f && f.name)
                                         .map(f => f.name)
                                         .filter(name => !histogramCache.has(timelapseDirectory + '|' + name));
-                                const missingChartFrames = snapshot.filter(f => f && f.name && !isFrameChartReady(f.name));
-                                const missingNames = snapshot
-                                        .filter(f => f && f.name)
-                                        .map(f => f.name)
-                                        .filter(name => !isFramePrepared(name) && !isFrameMetadataDetailed(name));
-                                const missingAiFrames = snapshot.filter(f => f && f.name && !isFrameAiReady(f.name));
+                                const enableDeepWarmup = !iosWarmupMode && (isMetadataDrawerOpen() || isChartsDrawerOpen());
+                                const missingChartFrames = enableDeepWarmup ? snapshot.filter(f => f && f.name && !isFrameChartReady(f.name)) : [];
+                                const missingNames = enableDeepWarmup
+                                        ? snapshot
+                                                .filter(f => f && f.name)
+                                                .map(f => f.name)
+                                                .filter(name => !isFramePrepared(name) && !isFrameMetadataDetailed(name))
+                                        : [];
+                                const missingAiFrames = enableDeepWarmup ? snapshot.filter(f => f && f.name && !isFrameAiReady(f.name)) : [];
 
                                 const totalTasks = imageWarmupFrames.length + missingHistNames.length + missingChartFrames.length + missingNames.length + missingAiFrames.length;
                                 let done = 0;
                                 const prepStartedAt = performance.now();
-                                let targetWorkers = Math.max(4, prepConcurrency);
+                                let targetWorkers = Math.max(iosWarmupMode ? 2 : 4, prepConcurrency);
                                 updatePrepTelemetry({
                                         phase: 'Initializing playback pipeline',
                                         done: 0,
@@ -4883,7 +5412,7 @@ self.onmessage = async (event) => {
 
                                         const tuner = setInterval(async () => {
                                                 await refreshPrepConcurrencyHint();
-                                                targetWorkers = Math.max(4, prepConcurrency);
+                                                targetWorkers = Math.max(iosWarmupMode ? 2 : 4, prepConcurrency);
                                                 pump();
                                         }, 1500);
 
@@ -4896,9 +5425,11 @@ self.onmessage = async (event) => {
                                 // Phase 1: fully warm browser image cache across all frames.
                                 await runPhase({
                                         items: imageWarmupFrames,
-                                        label: 'Phase 1/5: preloading frame images',
-                                        batchSize: 4,
-                                        workerCap: (target) => Math.max(2, Math.min(4, Math.floor(target / 16))),
+                                        label: iosWarmupMode ? 'Phase 1/2: preloading frame images (iOS safe mode)' : 'Phase 1/5: preloading frame images',
+                                        batchSize: iosWarmupMode ? 2 : 4,
+                                        workerCap: iosWarmupMode
+                                                ? () => (isLikelyIPhone ? 1 : 2)
+                                                : ((target) => Math.max(2, Math.min(4, Math.floor(target / 16)))),
                                         work: async (batch) => {
                                                 try {
                                                         await Promise.all(batch.map((frame) => preloadFrameImage(frame, true)));
@@ -4916,9 +5447,11 @@ self.onmessage = async (event) => {
                                 // Phase 2: generate 1:1 luma histogram coverage for every frame.
                                 await runPhase({
                                         items: missingHistNames,
-                                        label: 'Phase 2/5: histogram warmup',
-                                        batchSize: 4,
-                                        workerCap: (target) => Math.max(3, Math.min(6, Math.floor(target / 4))),
+                                        label: iosWarmupMode ? 'Phase 2/2: histogram warmup (iOS safe mode)' : 'Phase 2/5: histogram warmup',
+                                        batchSize: iosWarmupMode ? 2 : 4,
+                                        workerCap: iosWarmupMode
+                                                ? () => (isLikelyIPhone ? 1 : 2)
+                                                : ((target) => Math.max(3, Math.min(6, Math.floor(target / 4)))),
                                         work: async (batch) => {
                                                 try {
                                                         await fetchFramePayloadBatch(batch, true, false, 90000);
@@ -4930,7 +5463,27 @@ self.onmessage = async (event) => {
                                         },
                                 });
                                 if (isStale()) return;
-                                histStatus.textContent = 'Luma ready. Warming waveform/RGB...';
+                                histStatus.textContent = iosWarmupMode
+                                        ? 'Prepared iOS-safe cache. Deep warmup deferred.'
+                                        : (enableDeepWarmup
+                                                ? 'Luma ready. Warming waveform/RGB...'
+                                                : 'Playback cache ready. Deep analysis deferred until drawers open.');
+
+                                if (!enableDeepWarmup) {
+                                        const preloadReady = snapshot.every((f) => !f || !f.name || isFramePreloaded(f.name));
+                                        const histReady = snapshot.every((f) => !f || !f.name || histogramCache.has(timelapseDirectory + '|' + f.name));
+                                        if (preloadReady && histReady) openPlaybackGate();
+                                        updatePrepTelemetry({
+                                                phase: 'Playback Ready',
+                                                done,
+                                                total: totalTasks,
+                                                targetWorkers,
+                                                activeWorkers: 0,
+                                                queued: 0,
+                                                complete: true,
+                                        });
+                                        return;
+                                }
 
                                 // Phase 3: fill waveform/RGB charts for all frames.
                                 await runPhase({
@@ -5893,29 +6446,60 @@ self.onmessage = async (event) => {
         function advancePlaybackIndex() {
                 const loopStart = loopPlaybackEnabled ? getFrameLoopStart() : 0;
                 const loopEnd = loopPlaybackEnabled ? getFrameLoopEnd() : (frames.length - 1);
+                const goingForward = playbackDirection >= 0;
                 if (index < loopStart || index > loopEnd) {
+                        index = goingForward ? loopStart : loopEnd;
+                } else if (goingForward && index >= loopEnd) {
                         index = loopStart;
-                } else if (index >= loopEnd) {
-                        index = loopStart;
+                } else if (!goingForward && index <= loopStart) {
+                        index = loopEnd;
                 } else {
-                        index += 1;
+                        index += goingForward ? 1 : -1;
                 }
         }
 
         function restartLoop() {
-                if (timer) { clearInterval(timer); timer = null; }
+                if (timer) { clearTimeout(timer); timer = null; }
+                if (playbackRafId) {
+                        try { cancelAnimationFrame(playbackRafId); } catch (_) {}
+                        playbackRafId = 0;
+                }
+                playbackLastTickTs = 0;
+                playbackAccumulatorMs = 0;
                 if (!playing || !frames.length) return;
                 const fps = Math.max(1, Math.min(60, Number(fpsInput.value) || 12));
-                timer = setInterval(() => {
+                const frameStepMs = Math.max(1, Math.round(1000 / fps));
+
+                const tick = () => {
+                        if (!playing || !frames.length) {
+                                timer = null;
+                                return;
+                        }
                         advancePlaybackIndex();
                         renderFrame();
-                }, Math.round(1000 / fps));
+                        timer = setTimeout(tick, frameStepMs);
+                };
+
+                timer = setTimeout(tick, frameStepMs);
         }
 
         function seekTo(i) {
                 if (!frames.length) return;
                 index = Math.max(0, Math.min(frames.length - 1, i));
                 renderFrame();
+        }
+
+        function setPlaybackDirection(direction) {
+                playbackDirection = direction < 0 ? -1 : 1;
+                if (!isStageFullscreenActive()) return;
+                if (fsBackBtn) {
+                        fsBackBtn.classList.toggle('active', playbackDirection < 0);
+                        fsBackBtn.setAttribute('aria-pressed', playbackDirection < 0 ? 'true' : 'false');
+                }
+                if (fsForwardBtn) {
+                        fsForwardBtn.classList.toggle('active', playbackDirection > 0);
+                        fsForwardBtn.setAttribute('aria-pressed', playbackDirection > 0 ? 'true' : 'false');
+                }
         }
 
         // ── Events ───────────────────────────────────────────────────────────
@@ -6050,10 +6634,65 @@ self.onmessage = async (event) => {
         }
 
         exportVideoBtn.addEventListener('click', () => {
+                setRecomputeDrawerOpen(false);
                 const next = !(exportDrawer && exportDrawer.classList.contains('open'));
                 setExportDrawerOpen(next);
                 if (next) updateFfmpegPreview();
         });
+
+        if (metadataDrawerBtn) {
+                metadataDrawerBtn.addEventListener('click', () => {
+                        const next = !(metadataDrawer && metadataDrawer.classList.contains('open'));
+                        setMetadataDrawerOpen(next);
+                });
+        }
+
+        if (chartsDrawerBtn) {
+                chartsDrawerBtn.addEventListener('click', () => {
+                        const next = !(chartsDrawer && chartsDrawer.classList.contains('open'));
+                        setChartsDrawerOpen(next);
+                });
+        }
+
+        if (prepMiniDrawerBtn) {
+                prepMiniDrawerBtn.addEventListener('click', () => {
+                        const next = prepMiniDrawerEl ? prepMiniDrawerEl.classList.contains('collapsed') : true;
+                        setPrepMiniDrawerOpen(next);
+                });
+        }
+
+        if (drawerBackdrop) {
+                drawerBackdrop.addEventListener('click', () => {
+                        setMetadataDrawerOpen(false);
+                        setChartsDrawerOpen(false);
+                });
+        }
+
+        if (statsPanel) {
+                statsPanel.addEventListener('click', (event) => {
+                        const target = event && event.target ? event.target : null;
+                        if (target && target.closest && target.closest('.panel-title')) {
+                                setMetadataDrawerOpen(false);
+                        }
+                });
+        }
+
+        if (chartsDrawer) {
+                chartsDrawer.addEventListener('click', (event) => {
+                        const target = event && event.target ? event.target : null;
+                        if (target && target.closest && target.closest('.panel-title')) {
+                                setChartsDrawerOpen(false);
+                        }
+                });
+        }
+
+        if (recomputeToolsBtn) {
+                recomputeToolsBtn.addEventListener('click', () => {
+                        setExportDrawerOpen(false);
+                        const next = !(recomputeDrawer && recomputeDrawer.classList.contains('open'));
+                        setRecomputeDrawerOpen(next);
+                });
+        }
 
         exportRunBtn.addEventListener('click', () => {
                 runVideoExport();
@@ -6387,6 +7026,36 @@ self.onmessage = async (event) => {
                         if (playing) restartLoop();
                 });
         }
+        function setLoopDrawerOpen(open) {
+                if (!loopDrawer) return;
+                const isOpen = !!open;
+                loopDrawer.classList.toggle('open', isOpen);
+                loopDrawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+                if (loopDrawerBtn) loopDrawerBtn.classList.toggle('active', isOpen);
+        }
+
+        function setDeleteDrawerOpen(open) {
+                if (!deleteDrawer) return;
+                const isOpen = !!open;
+                deleteDrawer.classList.toggle('open', isOpen);
+                deleteDrawer.setAttribute('aria-hidden', isOpen ? 'false' : 'true');
+                if (deleteDrawerBtn) deleteDrawerBtn.classList.toggle('active', isOpen);
+        }
+
+        if (loopDrawerBtn) {
+                loopDrawerBtn.addEventListener('click', () => {
+                        const next = !(loopDrawer && loopDrawer.classList.contains('open'));
+                        setDeleteDrawerOpen(false);
+                        setLoopDrawerOpen(next);
+                });
+        }
+        if (deleteDrawerBtn) {
+                deleteDrawerBtn.addEventListener('click', () => {
+                        const next = !(deleteDrawer && deleteDrawer.classList.contains('open'));
+                        setLoopDrawerOpen(false);
+                        setDeleteDrawerOpen(next);
+                });
+        }
         if (viewOptimalBtn) {
                 viewOptimalBtn.addEventListener('click', async () => {
                         try {
@@ -6450,7 +7119,7 @@ self.onmessage = async (event) => {
                 const previousText = playPauseBtn.textContent;
                 playPauseBtn.textContent = 'Preparing...';
                 try {
-                        if (!prepPromise) {
+                        if (!prepPromise && !playbackReady) {
                                 prepareAllFramesForPlayback().catch(() => {});
                         }
                         if (!playbackReady) {
@@ -6466,6 +7135,9 @@ self.onmessage = async (event) => {
                                 index = loopStart;
                                 renderFrame();
                         }
+                        lastPlaybackMetadataRenderAt = 0;
+                        lastPlaybackHistogramRenderAt = 0;
+                        lastPlaybackChartsRenderAt = 0;
                         playing = true;
                         if (frames[index]) {
                                 const currentKey = timelapseDirectory + '|' + frames[index].name;
@@ -6488,9 +7160,25 @@ self.onmessage = async (event) => {
                 }
         });
 
-        prevBtn.addEventListener('click', () => { if (playing) { playing = false; playPauseBtn.textContent = 'Play'; playPauseBtn.classList.remove('active'); restartLoop(); } seekTo(index - 1); showBubble(true); });
-        nextBtn.addEventListener('click', () => { if (playing) { playing = false; playPauseBtn.textContent = 'Play'; playPauseBtn.classList.remove('active'); restartLoop(); } seekTo(index + 1); showBubble(true); });
+        prevBtn.addEventListener('click', () => {
+                if (playing) {
+                        setPlaybackDirection(-1);
+                        return;
+                }
+                seekTo(index - 1);
+                showBubble(true);
+        });
+        nextBtn.addEventListener('click', () => {
+                if (playing) {
+                        setPlaybackDirection(1);
+                        return;
+                }
+                seekTo(index + 1);
+                showBubble(true);
+        });
         if (miniPlayPauseBtn) miniPlayPauseBtn.addEventListener('click', () => { playPauseBtn.click(); });
+        if (fsBackBtn) fsBackBtn.addEventListener('click', () => { setPlaybackDirection(-1); });
+        if (fsForwardBtn) fsForwardBtn.addEventListener('click', () => { setPlaybackDirection(1); });
         if (miniExitFullscreenBtn) miniExitFullscreenBtn.addEventListener('click', () => { exitStageFullscreen().catch(() => {}); });
 
         tlScrub.addEventListener('pointerdown', () => { if (playing) { playing = false; playPauseBtn.textContent = 'Play'; playPauseBtn.classList.remove('active'); restartLoop(); } tlBubble.classList.add('show'); });
@@ -6512,12 +7200,15 @@ self.onmessage = async (event) => {
         }
 
         function handleStageTapForFullscreen(event) {
-                if (isStageFullscreenActive()) return;
                 const target = event && event.target ? event.target : null;
                 if (target && target.closest && target.closest('button, a, input, select, textarea, label, .timeline-wrap, .tl-controls')) {
                         return;
                 }
-                requestStageFullscreen().catch(() => {});
+                if (isStageFullscreenActive()) {
+                        exitStageFullscreen().catch(() => {});
+                } else {
+                        requestStageFullscreen().catch(() => {});
+                }
         }
 
         if (stageEl) stageEl.addEventListener('wheel', scrubWithWheel, { passive: false });
@@ -6558,6 +7249,11 @@ self.onmessage = async (event) => {
                         closeVideoModal().catch(() => {});
                         return;
                 }
+                if (event.key === 'Escape' && ((metadataDrawer && metadataDrawer.classList.contains('open')) || (chartsDrawer && chartsDrawer.classList.contains('open')))) {
+                        setMetadataDrawerOpen(false);
+                        setChartsDrawerOpen(false);
+                        return;
+                }
                 if (event.key === 'Escape' && isStageFullscreenActive()) {
                         exitStageFullscreen().catch(() => {});
                 }
@@ -6570,6 +7266,7 @@ self.onmessage = async (event) => {
 
         // ── Init ─────────────────────────────────────────────────────────────
         drawHistPlaceholder('Loading...');
+        showFrameStageOverlay('Loading frames...', false);
         setPlayUi();
         updateStageFullscreenUi();
         updateFrameLoopUi();
@@ -6598,6 +7295,7 @@ self.onmessage = async (event) => {
                 frameSwapInFlight = false;
                 if (!firstFrameResolved) {
                         firstFrameResolved = true;
+                        setInitialStageLoading(false);
                         frameImg.classList.remove('first-load-pending');
                         hideFrameStageOverlay();
                 }
@@ -6610,6 +7308,7 @@ self.onmessage = async (event) => {
                         frameImg.removeAttribute('src');
                         frameImg.classList.remove('first-load-pending');
                         firstFrameResolved = true;
+                        setInitialStageLoading(false);
                         showFrameStageOverlay('Preview unavailable for this timelapse.', true);
                         return;
                 }
@@ -6632,6 +7331,7 @@ self.onmessage = async (event) => {
                 frameImg.removeAttribute('src');
                 frameImg.classList.remove('first-load-pending');
                 firstFrameResolved = true;
+                setInitialStageLoading(false);
                 showFrameStageOverlay('Unable to load frame image for this loop range.', true);
         });
         loadServerCapacity().catch(() => {});
@@ -6646,6 +7346,13 @@ self.onmessage = async (event) => {
         } else {
                 setExportDrawerOpen(true);
         }
+        setRecomputeDrawerOpen(false);
+        setMetadataDrawerOpen(false);
+        setChartsDrawerOpen(false);
+        setPrepMiniDrawerOpen(false);
+        setLoopDrawerOpen(false);
+        setDeleteDrawerOpen(false);
+        setPlaybackDirection(1);
         updateFfmpegPreview();
 </script>
 </body>
