@@ -3925,7 +3925,8 @@
         }
 
         // Max pixel width to request from server for this device. Null = full res.
-        function _currentPreviewMaxWidth() {
+        function _currentPreviewMaxWidth(fullscreenOverride) {
+                const fullscreenActive = (typeof fullscreenOverride === 'boolean') ? fullscreenOverride : isStageFullscreenActive();
                 if (isLikelyIPhone) {
                         const dpr = Number(window.devicePixelRatio || 1) || 1;
                         const cssWidth = Math.max(
@@ -3950,12 +3951,12 @@
                 if (window.screen && window.screen.width && window.screen.width < 1400) {
                         return Math.min(1280, requestedWidth);
                 }
-                const desktopCap = isStageFullscreenActive() ? 1920 : 1728;
+                const desktopCap = fullscreenActive ? 1280 : 1728;
                 return Math.min(desktopCap, requestedWidth);
         }
 
-        function _applyPreviewWidth(url) {
-                const previewMaxWidth = _currentPreviewMaxWidth();
+        function _applyPreviewWidth(url, fullscreenOverride) {
+                const previewMaxWidth = _currentPreviewMaxWidth(fullscreenOverride);
                 if (!previewMaxWidth || !url) return url;
                 try {
                         const u = new URL(url, window.location.origin);
@@ -4167,6 +4168,19 @@
                 setMetadataDrawerOpen(false);
                 setChartsDrawerOpen(false);
 
+                if (frames.length && !isLikelyIOS) {
+                        try {
+                                const prioritizedFrames = (index > 0)
+                                        ? frames.slice(index).concat(frames.slice(0, index))
+                                        : frames.slice(0);
+                                const immediateFrames = prioritizedFrames.slice(0, Math.min(4, prioritizedFrames.length));
+                                if (immediateFrames.length) {
+                                        await Promise.all(immediateFrames.map((frame) => preloadFrameImage(frame, false, true)));
+                                }
+                        } catch (_) {
+                        }
+                }
+
                 // Force app-managed fullscreen on iPad to avoid Safari-native chrome (top-left X)
                 // and keep our Play/Exit controls consistently visible.
                 if (isLikelyIPad) {
@@ -4198,6 +4212,7 @@
                         document.body.classList.add('stage-pseudo-fullscreen');
                 }
                 updateStageFullscreenUi();
+                warmFullscreenFrameVariants().catch(() => {});
         }
 
         async function openVideoModal(downloadUrl, fileName) {
@@ -5166,9 +5181,16 @@ self.onmessage = async (event) => {
                 return hasComparisons && captureIncluded;
         }
 
-        function isFramePreloaded(frameName) {
-                if (!frameName) return false;
-                const cacheKey = timelapseDirectory + '|' + frameName;
+        function makeFramePreloadCacheKey(frame, fullscreenOverride) {
+                if (!frame || !frame.name || !frame.url) return '';
+                const preloadUrl = _applyPreviewWidth(String(frame.url || ''), fullscreenOverride);
+                if (!preloadUrl) return '';
+                return timelapseDirectory + '|' + frame.name + '|' + preloadUrl;
+        }
+
+        function isFramePreloaded(frame, fullscreenOverride) {
+                const cacheKey = makeFramePreloadCacheKey(frame, fullscreenOverride);
+                if (!cacheKey) return false;
                 return framePreloadedCache.has(cacheKey);
         }
 
@@ -5178,9 +5200,11 @@ self.onmessage = async (event) => {
                 return chartCache.has(cacheKey);
         }
 
-        async function preloadFrameImage(frame, force) {
+        async function preloadFrameImage(frame, force, fullscreenOverride) {
                 if (!frame || !frame.name || !frame.url) return;
-                const cacheKey = timelapseDirectory + '|' + frame.name;
+                const cacheKey = makeFramePreloadCacheKey(frame, fullscreenOverride);
+                const preloadUrl = _applyPreviewWidth(String(frame.url || ''), fullscreenOverride);
+                if (!cacheKey || !preloadUrl) return;
                 if (!force && framePreloadedCache.has(cacheKey)) return;
                 await new Promise((resolve, reject) => {
                         const img = new Image();
@@ -5196,8 +5220,41 @@ self.onmessage = async (event) => {
                                 }
                         };
                         img.onerror = () => reject(new Error('image preload failed'));
-                        img.src = frame.url;
+                        img.src = preloadUrl;
                 });
+        }
+
+        async function warmFullscreenFrameVariants() {
+                if (!frames.length || isLikelyIOS) return;
+                const prioritizedFrames = (index > 0)
+                        ? frames.slice(index).concat(frames.slice(0, index))
+                        : frames.slice(0);
+                const immediateFrames = prioritizedFrames.slice(0, Math.min(4, prioritizedFrames.length));
+                const remainingFrames = prioritizedFrames.slice(immediateFrames.length);
+
+                if (immediateFrames.length) {
+                        try {
+                                await Promise.all(immediateFrames.map((frame) => preloadFrameImage(frame, false, true)));
+                        } catch (_) {
+                                for (const frame of immediateFrames) {
+                                        try { await preloadFrameImage(frame, false, true); } catch (_) {}
+                                }
+                        }
+                }
+
+                if (!remainingFrames.length) return;
+                setTimeout(async () => {
+                        for (let offset = 0; offset < remainingFrames.length; offset += 4) {
+                                const batch = remainingFrames.slice(offset, offset + 4);
+                                try {
+                                        await Promise.all(batch.map((frame) => preloadFrameImage(frame, false, true)));
+                                } catch (_) {
+                                        for (const frame of batch) {
+                                                try { await preloadFrameImage(frame, false, true); } catch (_) {}
+                                        }
+                                }
+                        }
+                }, 0);
         }
 
         async function fetchHistogramForFrame(frameName, force) {
@@ -5432,16 +5489,16 @@ self.onmessage = async (event) => {
                                                 : ((target) => Math.max(2, Math.min(4, Math.floor(target / 16)))),
                                         work: async (batch) => {
                                                 try {
-                                                        await Promise.all(batch.map((frame) => preloadFrameImage(frame, true)));
+                                                        await Promise.all(batch.map((frame) => preloadFrameImage(frame, true, false)));
                                                 } catch (_) {
                                                         for (const frame of batch) {
-                                                                try { await preloadFrameImage(frame, true); } catch (_) {}
+                                                                try { await preloadFrameImage(frame, true, false); } catch (_) {}
                                                         }
                                                 }
                                         },
                                 });
                                 if (isStale()) return;
-                                const preloadReadyNow = snapshot.every((f) => !f || !f.name || isFramePreloaded(f.name));
+                                const preloadReadyNow = snapshot.every((f) => !f || !f.name || isFramePreloaded(f, false));
                                 if (preloadReadyNow) openPlaybackGate();
 
                                 // Phase 2: generate 1:1 luma histogram coverage for every frame.
@@ -5470,7 +5527,7 @@ self.onmessage = async (event) => {
                                                 : 'Playback cache ready. Deep analysis deferred until drawers open.');
 
                                 if (!enableDeepWarmup) {
-                                        const preloadReady = snapshot.every((f) => !f || !f.name || isFramePreloaded(f.name));
+                                        const preloadReady = snapshot.every((f) => !f || !f.name || isFramePreloaded(f, false));
                                         const histReady = snapshot.every((f) => !f || !f.name || histogramCache.has(timelapseDirectory + '|' + f.name));
                                         if (preloadReady && histReady) openPlaybackGate();
                                         updatePrepTelemetry({
@@ -5541,7 +5598,7 @@ self.onmessage = async (event) => {
                                 });
                                 if (isStale()) return;
 
-                                const preloadReady = snapshot.every((f) => !f || !f.name || isFramePreloaded(f.name));
+                                const preloadReady = snapshot.every((f) => !f || !f.name || isFramePreloaded(f, false));
                                 const histReady = snapshot.every((f) => !f || !f.name || histogramCache.has(timelapseDirectory + '|' + f.name));
                                 const chartsReady = snapshot.every((f) => !f || !f.name || isFrameChartReady(f.name));
                                 const metadataReady = snapshot.every((f) => !f || !f.name || isFramePrepared(f.name) || isFrameMetadataDetailed(f.name));
